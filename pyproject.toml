@@ -1,0 +1,19 @@
+[project]
+name = "jobboard-mcp"
+version = "0.2.0"
+description = "Modular MCP server for job boards (extensible to company/funding info)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "You" }]
+dependencies = [
+  "aiohttp>=3.9",
+  "beautifulsoup4>=4.12",
+  "python-dotenv>=1.0",
+  "pydantic>=2.6",
+  "mcp>=0.1.0",  # Adjust to the actual package providing mcp.server.* APIs
+]
+
+[project.scripts]
+jobboard-mcp = "jobboard_mcp.main:run"
+
+[tool.uv] # if you use uv; otherwise ignore
