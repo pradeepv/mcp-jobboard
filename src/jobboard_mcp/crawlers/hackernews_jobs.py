@@ -63,8 +63,6 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
     def _parse_jobs_page(self, soup: BeautifulSoup, per_page_limit: int) -> List[JobPosting]:
         jobs: List[JobPosting] = []
 
-        # Each job is a 'story' row with class 'athing'
-        # Title is in span.titleline > a
         rows = soup.select("tr.athing")
         for row in rows:
             if per_page_limit and len(jobs) >= per_page_limit:
@@ -82,14 +80,11 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
             story_url = title_a.get("href") or ""
             item_id = (row.get("id") or "").strip()
 
-            # Company and location often encoded like "Company (Location) is hiring Role" etc.
             company, title, location = self._guess_fields_from_title(title_text)
 
-            # Extract site/source bit (e.g., "ashbyhq.com") for remote hint and tags
             sitebit = titleline.select_one(".sitestr")
             site_str = sitebit.get_text(strip=True) if sitebit else ""
 
-            # Clean YC batch tags from company into tags
             tags: List[str] = []
             if company:
                 m = re.search(r"\((YC\s+[SW]\d{2})\)", company, flags=re.I)
@@ -97,14 +92,12 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
                     tags.append(m.group(1).upper())
                     company = re.sub(r"\s*\((YC\s+[SW]\d{2})\)\s*", "", company, flags=re.I).strip()
 
-            # Remote detection heuristics from title/site
             title_low = title_text.lower()
             remote_ok = any(
                 k in title_low
                 for k in ["remote", "remotely", "anywhere", "distributed", "work from home", "wfh", "us-remote", "remote-us"]
             )
 
-            # Permalink to HN item
             hn_link = f"{self.BASE}/item?id={item_id}" if item_id else ""
 
             jobs.append(
@@ -115,7 +108,7 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
                     title=title or title_text,
                     company=company or "Unknown",
                     location=location or "Unknown",
-                    description="",  # Jobs board listings don’t have full text here
+                    description="",
                     posted_date=None,
                     salary=None,
                     job_type=None,
@@ -124,17 +117,13 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
                     seniority=None,
                     tags=tags,
                     raw_html=str(row),
+                    source_key=self.KEY,
                 )
             )
 
         return jobs
 
     def _guess_fields_from_title(self, text: str):
-        """
-        Robust heuristics for extracting company, title, and location from HN Jobs titles.
-        Never raises; always returns (company|None, title, location|None).
-        Prefers the last parenthetical that looks like a location, and ignores YC batch tags.
-        """
         t = (text or "").strip()
         if not t:
             return None, "", None
@@ -143,10 +132,8 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
         title: str = t
         location: Optional[str] = None
 
-        # Collect all parenthetical groups
         parens = re.findall(r"\(([^)]+)\)", t)
 
-        # Helper heuristics
         loc_tokens = {
             "remote", "us", "usa", "united states", "uk", "london", "nyc", "sf", "san francisco",
             "berlin", "europe", "eu", "canada", "toronto", "vancouver", "australia", "singapore",
@@ -157,27 +144,20 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
             s_low = s.strip().lower()
             if not s_low:
                 return False
-            # Ignore YC batch tags
             if s_low.startswith("yc "):
                 return False
-            # If contains any known location token, treat as location
             if any(tok in s_low for tok in loc_tokens):
                 return True
-            # Short, non-numeric tokens like "NYC", "SF"
             if len(s_low) <= 6 and s_low.replace("/", "").replace("-", "").isalpha():
                 return True
             return False
 
-        # Prefer the last parenthetical that looks like a location
         last_loc = None
         for grp in reversed(parens):
             if looks_like_location(grp):
                 last_loc = grp.strip()
                 break
 
-        # Try patterns, but be forgiving
-
-        # Pattern A: "Company ... is hiring Title"
         m = re.match(r"^\s*(.+?)\s+is\s+hiring\s+(.+?)\s*$", t, re.I)
         if m:
             company = m.group(1).strip()
@@ -186,7 +166,6 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
                 location = last_loc
             return company, title, location
 
-        # Pattern B: "Title ... at Company"
         m = re.match(r"^\s*(.+?)\s+at\s+(.+?)\s*$", t, re.I)
         if m:
             title = m.group(1).strip()
@@ -195,7 +174,6 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
                 location = last_loc
             return company, title, location
 
-        # Pattern C: "Company hiring Title"
         m = re.match(r"^\s*(.+?)\s+hiring\s+(.+?)\s*$", t, re.I)
         if m:
             company = m.group(1).strip()
@@ -204,7 +182,6 @@ class HackerNewsJobsCrawler(BaseCrawler[JobPosting]):
                 location = last_loc
             return company, title, location
 
-        # Fallbacks: no reliable split; preserve original title, add location if detected
         if last_loc:
             location = last_loc
 

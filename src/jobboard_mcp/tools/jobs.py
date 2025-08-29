@@ -2,29 +2,199 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Callable
+from urllib.parse import urlparse
 
 from ..crawlers.base import BaseCrawler
 from ..crawlers.hackernews_jobs import HackerNewsJobsCrawler
 from ..crawlers.ycombinator import YCombinatorCrawler
 from ..models.job import JobPosting
 
+# --------------------
+# ATS handler registry
+# --------------------
+
+# --------------------
+# ATS handler registry
+# --------------------
+
+ATS_HANDLER: Dict[str, Callable[[JobPosting, str], JobPosting]] = {}
+
+def register_ats(domain: str):
+    def deco(fn: Callable[[JobPosting, str], JobPosting]):
+        ATS_HANDLER[domain.lower()] = fn
+        return fn
+    return deco
+
+def text_collapse(text: str) -> str:
+    # collapse excessive blank lines, normalize bullets lightly
+    text = re.sub(r"\r\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # also collapse excessive spaces before newlines
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    return text.strip()
+
+try:
+    from bs4 import BeautifulSoup
+except Exception:
+    BeautifulSoup = None  # type: ignore
+
+@register_ats("jobs.ashbyhq.com")
+@register_ats("www.ashbyhq.com")
+def parse_ashby(job: JobPosting, html: str) -> JobPosting:
+    if not BeautifulSoup:
+        return job
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Remove obvious chrome to avoid picking massive non-description areas
+    for sel in ["header", "nav", "footer", "[role='navigation']", "[role='banner']", "[role='contentinfo']"]:
+        for el in soup.select(sel):
+            el.decompose()
+
+    # Common Ashby containers (cover multiple tenant themes)
+    selectors = [
+        '[data-testid="job-posting__description"]',
+        '[data-test="job-posting__description"]',
+        '[data-testid="job-description"]',
+        ".job-posting__description",
+        ".JobPosting__Description",
+        ".Posting__Description",
+        ".posting-description",
+        ".prose",                 # tailwind prose
+        ".ProseMirror",           # editor output
+        "article",
+        "main",
+        ".content",
+        "section",
+    ]
+
+    node = None
+    for sel in selectors:
+        cand = soup.select_one(sel)
+        if cand and cand.get_text(strip=True):
+            node = cand
+            break
+
+    # Heuristic fallback: choose the largest text block inside <main> or whole page
+    def biggest_text_block(root):
+        candidates = []
+        for el in root.find_all(["div", "section", "article"]):
+            # Skip elements that are likely layout-only
+            classes = " ".join(el.get("class", [])).lower()
+            if any(c in classes for c in ["header", "nav", "footer", "sidebar", "apply", "application"]):
+                continue
+            text = el.get_text(" ", strip=True)
+            if text and len(text) > 400:  # avoid trivial blocks
+                candidates.append((len(text), el))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+
+    if not node:
+        root = soup.select_one("main") or soup  # prefer main region
+        node = biggest_text_block(root) or biggest_text_block(soup)
+
+    if node:
+        # Clean out script/style/noscript
+        for bad in node.find_all(["script", "style", "noscript"]):
+            bad.decompose()
+        text = node.get_text("\n", strip=True)
+        if text:
+            job.description = text_collapse(text)
+
+    # Salary and remote hints
+    blob = soup.get_text(" ", strip=True)
+    m = re.search(r"(Salary|Compensation|Pay|Base)\s*[:\-]\s*([^\n]+)", blob, re.I)
+    if m and not job.salary:
+        job.salary = m.group(2).strip()
+    job.remote_ok = job.remote_ok or ("remote" in blob.lower())
+
+    return job
+
+@register_ats("boards.greenhouse.io")
+def parse_greenhouse(job: JobPosting, html: str) -> JobPosting:
+    if not BeautifulSoup:
+        return job
+    soup = BeautifulSoup(html, "html.parser")
+    # Greenhouse has fairly consistent containers but varies per company theme
+    node = (
+        soup.select_one("#content")
+        or soup.select_one(".content")
+        or soup.select_one(".opening .content")
+        or soup.select_one(".app-content")
+        or soup.find("article")
+        or soup.find("main")
+    )
+    if node:
+        job.description = text_collapse(node.get_text("\n", strip=True))
+    blob = soup.get_text(" ", strip=True)
+    job.remote_ok = job.remote_ok or ("remote" in blob.lower())
+    m = re.search(r"(Salary|Compensation|Pay|Base)\s*[:\-]\s*([^\n]+)", blob, re.I)
+    if m and not job.salary:
+        job.salary = m.group(2).strip()
+    return job
+
+@register_ats("jobs.lever.co")
+def parse_lever(job: JobPosting, html: str) -> JobPosting:
+    if not BeautifulSoup:
+        return job
+    soup = BeautifulSoup(html, "html.parser")
+    node = soup.select_one(".description, .section.page, .content, .content-container, .posting") or soup.find(id="job")
+    if node:
+        job.description = text_collapse(node.get_text("\n", strip=True))
+    blob = soup.get_text(" ", strip=True)
+    m = re.search(r"(Salary|Compensation|Pay)\s*[:\-]\s*([^\n]+)", blob, re.I)
+    if m and not job.salary:
+        job.salary = m.group(2).strip()
+    job.remote_ok = job.remote_ok or ("remote" in blob.lower())
+    return job
+
+@register_ats("www.workatastartup.com")
+def parse_workatastartup(job: JobPosting, html: str) -> JobPosting:
+    if not BeautifulSoup:
+        return job
+    soup = BeautifulSoup(html, "html.parser")
+    node = (
+        soup.select_one(".job-detail, .job, main, article, #__next main")
+        or soup.find("main")
+        or soup.find("article")
+    )
+    if node:
+        job.description = text_collapse(node.get_text("\n", strip=True))
+    if "remote" in soup.get_text(" ", strip=True).lower():
+        job.remote_ok = True
+    return job
+
+@register_ats("deepnote.com")
+def parse_deepnote(job: JobPosting, html: str) -> JobPosting:
+    if not BeautifulSoup:
+        return job
+    soup = BeautifulSoup(html, "html.parser")
+    node = soup.select_one("main, article, [data-page], .careers, .jobs")
+    if node:
+        job.description = text_collapse(node.get_text("\n", strip=True))
+    if "remote" in soup.get_text(" ", strip=True).lower():
+        job.remote_ok = True
+    return job
 
 class JobService:
     """
-    Aggregates job crawlers behind one interface with filtering and dedupe.
+    Aggregates job crawlers behind one interface with filtering, dedupe, and enrichment.
     """
 
-    # Register only crawlers that exist and are confirmed working.
     SOURCE_MAP: Dict[str, type] = {
         "hackernews_jobs": HackerNewsJobsCrawler,
         "ycombinator": YCombinatorCrawler,
     }
 
     def __init__(self, cache_ttl_seconds: int = 600):
-        # Kept for API parity; not passed into crawlers (their __init__ doesn't accept it).
         self.cache_ttl_seconds = cache_ttl_seconds
         self._instances: Dict[str, BaseCrawler] = {}
+        # Per-domain concurrency and global cap
+        self._domain_semaphores: Dict[str, asyncio.Semaphore] = {}
+        self._global_sem = asyncio.Semaphore(10)
 
     async def __aenter__(self) -> "JobService":
         return self
@@ -33,9 +203,7 @@ class JobService:
         await self.aclose()
 
     async def aclose(self):
-        # Cleanly close any underlying aiohttp sessions via BaseCrawler.close_session()
         for inst in self._instances.values():
-            # Prefer BaseCrawler.close_session
             close = getattr(inst, "close_session", None)
             if callable(close):
                 try:
@@ -43,7 +211,6 @@ class JobService:
                     continue
                 except Exception:
                     pass
-            # Fallback to aclose if provided by a crawler
             aclose = getattr(inst, "aclose", None)
             if callable(aclose):
                 try:
@@ -57,7 +224,6 @@ class JobService:
             raise ValueError(f"Unknown source: {key}")
         if key_l not in self._instances:
             cls = self.SOURCE_MAP[key_l]
-            # Do not pass unsupported kwargs
             self._instances[key_l] = cls()  # type: ignore[call-arg]
         return self._instances[key_l]
 
@@ -70,6 +236,8 @@ class JobService:
         max_pages: int = 1,
         per_source_limit: int = 100,
         tags: Optional[List[str]] = None,
+        enrich: bool = True,
+        enrich_limit: Optional[int] = 50,
     ) -> List[JobPosting]:
         if not sources:
             return []
@@ -99,10 +267,14 @@ class JobService:
 
         deduped = self._dedupe_jobs_merge_tags(jobs)
 
-        print(
-            f"DEBUG job_service: total_kept={len(deduped)} "
-            f"(sources={requested_sources}, remote_only={remote_only}, location='{location}', tags={tags})"
-        )
+        if enrich and deduped:
+            limit = enrich_limit if enrich_limit is not None else 50
+            subset = deduped[:limit]
+            try:
+                enriched_subset = await self.enrich_details(subset)
+                deduped[:len(enriched_subset)] = enriched_subset
+            except Exception as e:
+                print(f"[WARN] enrich failed: {e}")
 
         return deduped
 
@@ -114,7 +286,6 @@ class JobService:
         per_source_limit: int,
     ) -> List[JobPosting]:
         inst = self._get_instance(source_key)
-        # Be lenient with crawler signatures
         try:
             jobs = await inst.crawl(
                 keywords=keywords,
@@ -132,7 +303,81 @@ class JobService:
 
         if per_source_limit and len(jobs) > per_source_limit:
             jobs = jobs[:per_source_limit]
+        # ensure source_key is set if crawler forgot
+        for j in jobs:
+            if not getattr(j, "source_key", None):
+                j.source_key = source_key
         return jobs
+
+    # ------------- Enrichment -------------
+
+    def _get_domain_sem(self, domain: str) -> asyncio.Semaphore:
+        dom = domain.lower()
+        if dom not in self._domain_semaphores:
+            # Default to 4 concurrent per domain
+            self._domain_semaphores[dom] = asyncio.Semaphore(4)
+        return self._domain_semaphores[dom]
+
+    async def enrich_details(self, jobs: List[JobPosting]) -> List[JobPosting]:
+            seen_debug = {"count": 0}  # closure state for light debug
+
+            async def enrich_one(job: JobPosting) -> JobPosting:
+                if not job.url or (job.description and job.description.strip()):
+                    return job
+
+                parsed = urlparse(job.url)
+                domain = parsed.netloc.lower()
+
+                handler = ATS_HANDLER.get(domain)
+                if not handler:
+                    # debug for first items
+                    if seen_debug["count"] < 15:
+                        print(f"[enrich] skip: no handler for domain={domain} url={job.url}")
+                        seen_debug["count"] += 1
+                    return job
+
+                # Choose a session: reuse the crawler session if possible
+                crawler = None
+                if job.source_key:
+                    crawler = self._instances.get(job.source_key)
+
+                async def fetch_html() -> Optional[str]:
+                    try:
+                        if crawler:
+                            return await crawler.get_text(job.url, timeout=20)
+                        if self._instances:
+                            any_crawler = next(iter(self._instances.values()))
+                            return await any_crawler.get_text(job.url, timeout=20)
+                    except Exception as e:
+                        if seen_debug["count"] < 15:
+                            print(f"[enrich] fetch error for {domain}: {e}")
+                            seen_debug["count"] += 1
+                        return None
+                    return None
+
+                # Respect concurrency limits
+                dom_sem = self._get_domain_sem(domain)
+                async with self._global_sem, dom_sem:
+                    html = await fetch_html()
+                    if seen_debug["count"] < 15:
+                        print(f"[enrich] domain={domain} handler=YES html_len={len(html) if html else 0} url={job.url}")
+                        seen_debug["count"] += 1
+                    if not html:
+                        return job
+                    try:
+                        enriched = handler(job, html)
+                        # If still empty, log once
+                        if seen_debug["count"] < 15 and not (enriched.description or "").strip():
+                            print(f"[enrich] handler produced empty description for domain={domain}")
+                            seen_debug["count"] += 1
+                        return enriched
+                    except Exception as e:
+                        if seen_debug["count"] < 15:
+                            print(f"[enrich] handler error for {domain}: {e}")
+                            seen_debug["count"] += 1
+                        return job
+
+            return await asyncio.gather(*(enrich_one(j) for j in jobs))    # ------------- Filters & Dedupe -------------
 
     def _normalize_tags(self, tags: Optional[List[str]]) -> List[str]:
         if not tags:
@@ -147,7 +392,6 @@ class JobService:
         if not url:
             return ""
         u = url.strip()
-        # Trim common tracking params conservatively
         u = re.sub(r"[?#](utm_[^=&]+=[^&]*&?)+", "", u, flags=re.I)
         u = re.sub(r"[?#](gh_src|ref|source|lever-source|ashby_jid|ashby_src)=[^&]*&?", "?", u, flags=re.I)
         u = re.sub(r"\?&+$", "?", u)
@@ -162,7 +406,6 @@ class JobService:
             if key in seen:
                 idx = seen[key]
                 keep = out[idx]
-                # Merge tags, prefer True for remote_ok, and fill missing company/location
                 keep.tags = sorted(set((keep.tags or []) + (j.tags or [])))
                 keep.remote_ok = bool(getattr(keep, "remote_ok", False) or getattr(j, "remote_ok", False))
                 if (keep.location in (None, "", "Unknown")) and j.location and j.location != "Unknown":
@@ -215,23 +458,15 @@ class JobService:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "keywords": {
-                            "type": ["array", "null"],
-                            "items": {"type": "string"},
-                        },
-                        "sources": {
-                            "type": "array",
-                            "items": {"type": "string", "enum": list(self.SOURCE_MAP.keys())},
-                        },
+                        "keywords": {"type": ["array", "null"], "items": {"type": "string"}},
+                        "sources": {"type": "array", "items": {"type": "string", "enum": list(self.SOURCE_MAP.keys())}},
                         "location": {"type": "string"},
                         "remote_only": {"type": "boolean"},
                         "max_pages": {"type": "integer", "minimum": 1, "default": 1},
                         "per_source_limit": {"type": "integer", "minimum": 1, "default": 100},
-                        "tags": {
-                            "type": ["array", "null"],
-                            "items": {"type": "string"},
-                            "description": "Require all tags to be present (case-insensitive).",
-                        },
+                        "tags": {"type": ["array", "null"], "items": {"type": "string"}},
+                        "enrich": {"type": "boolean", "default": True},
+                        "enrich_limit": {"type": ["integer", "null"], "default": 50},
                     },
                     "required": ["sources", "location", "remote_only"],
                 },
