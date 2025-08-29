@@ -77,7 +77,6 @@ class YCombinatorCrawler(BaseCrawler[JobPosting]):
             if remote_ok:
                 tags.append("Remote")
             if location:
-                # Add a simple location hint as tag (e.g., "NYC")
                 tags.append(location)
 
             jobs.append(
@@ -89,7 +88,8 @@ class YCombinatorCrawler(BaseCrawler[JobPosting]):
                     url=job_url,
                     source="Y Combinator",
                     remote_ok=remote_ok,
-                    tags=tags or None,
+                    tags=tags,
+                    source_key=self.KEY,
                 )
             )
 
@@ -106,20 +106,18 @@ class YCombinatorCrawler(BaseCrawler[JobPosting]):
         t = title.strip()
 
         # Try to extract the trailing parenthetical as location
-        # Look for the last (...) block and use it as location candidate
         loc = None
         parens = list(re.finditer(r"\(([^)]+)\)", t))
         if parens:
             loc_candidate = parens[-1].group(1).strip()
-            # Avoid matching YC batch as location; if it looks like "YC S23" or "W24", ignore
             if not re.search(r"\bYC\b|\bS\d{2}\b|\bW\d{2}\b|\bF\d{2}\b", loc_candidate):
                 loc = loc_candidate
 
-        # Company often appears at the start before a dash or before 'is hiring'/'hiring' or after 'at'
         company = None
 
-        # Pattern 1: "Company -- Role ..." or "Company - Role ..."
-        m = re.match(r"^([^---:|]+?)\s*[---:|]\s*", t)
+        # Pattern 1: "Company -- Role ..." or "Company - Role ..." or "Company | Role" or "Company: Role"
+        # Fix: avoid ambiguous character class; use explicit group of separators.
+        m = re.match(r"^([^:\-\|]+?)\s*(?:[:\-\|]+)\s*", t)
         if m:
             company = m.group(1).strip()
         else:
@@ -140,15 +138,12 @@ class YCombinatorCrawler(BaseCrawler[JobPosting]):
 
         # Basic cleanup for company
         if company:
-            company = re.sub(r"\b(is\s+hiring|hiring)\b.*$", "", company, flags=re.I).strip(" ---|:.,")
-            # Trim common trailing batch info
+            company = re.sub(r"\b(is\s+hiring|hiring)\b.*$", "", company, flags=re.I).strip(" -|:.,")
             company = re.sub(r"\s*\(YC\b.*?\)\s*$", "", company).strip()
 
         # Normalize location strings
         if loc:
-            loc = loc.strip()
-            loc = loc.strip(" .,/;:-")
-            # Expand common abbreviations
+            loc = loc.strip().strip(" .,/;:-")
             loc = loc.replace("ANYWHERE", "Anywhere").replace("anywhere", "Anywhere")
             loc = re.sub(r"\bUS\b", "United States", loc)
             loc = re.sub(r"\bUK\b", "United Kingdom", loc)
@@ -156,14 +151,7 @@ class YCombinatorCrawler(BaseCrawler[JobPosting]):
         return company if company else None, loc if loc else None
 
     def _extract_yc_batch(self, title: str) -> Optional[str]:
-        """
-        Extract YC batch-like markers and return a normalized single tag if present.
-        Examples: "YC S23", "S23", "W24", "F22".
-        Preference order:
-          - YC <season><yy> (normalized with YC prefix if missing)
-        """
         t = title
-        # Match patterns like "(YC S23)" or "YC S23" or "(S23)"
         m = re.search(r"\b(?:YC\s*)?(S|W|F)\s?(\d{2})\b", t, flags=re.I)
         if not m:
             return None
@@ -173,13 +161,7 @@ class YCombinatorCrawler(BaseCrawler[JobPosting]):
 
     def _is_remote(self, title: str) -> bool:
         t = title.lower()
-        remote_terms = [
-            "remote",
-            "anywhere",
-            "work from home",
-            "wfh",
-            "distributed",
-        ]
+        remote_terms = ["remote", "anywhere", "work from home", "wfh", "distributed"]
         return any(term in t for term in remote_terms)
 
     def _filter(self, jobs: List[JobPosting], keywords: Optional[List[str]]) -> List[JobPosting]:

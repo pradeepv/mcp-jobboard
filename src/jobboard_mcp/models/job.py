@@ -7,7 +7,7 @@ from typing import List, Optional
 class JobPosting:
     # Identity and provenance
     id: Optional[str] = None
-    source: str = ""
+    source: str = ""                 # Human-friendly source label, e.g., "Y Combinator"
 
     # Links
     url: str = ""
@@ -29,3 +29,6 @@ class JobPosting:
 
     # Raw content (optional)
     raw_html: Optional[str] = None
+
+    # New: internal routing key for JobService/crawlers (e.g., "ycombinator", "hackernews_jobs")
+    source_key: Optional[str] = None
