@@ -8,7 +8,7 @@ async def main():
     async with JobService(cache_ttl_seconds=300) as svc:
         jobs = await svc.search_jobs(
             keywords=None,
-            sources=["hackernews_jobs", "ycombinator"],
+            sources=["hackernews_jobs", "ycombinator", "workatastartup"],
             location="",
             remote_only=False,
             max_pages=1,
@@ -32,7 +32,8 @@ async def main():
         # Show first 10 URLs and description lengths to verify enrichment
         print("\nFirst 10 jobs (source_key, url, desc_len):")
         for j in jobs[:10]:
-            print(j.source_key, j.url, "desc_len=", len(j.description or ""))
+            source_key = getattr(j, 'source_key', 'unknown')
+            print(source_key, j.url, "desc_len=", len(j.description or ""))
 
         # Print a richer sample of the first job
         print("\nSample job (first item):")

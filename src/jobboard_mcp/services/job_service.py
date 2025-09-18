@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 from ..models.job import JobPosting
 from ..crawlers.ycombinator import YCombinatorCrawler
 from ..crawlers.hackernews import HackerNewsCrawler
+from ..crawlers.workatastartup import WorkAtStartupCrawler
 
 
 class JobService:
@@ -17,9 +18,11 @@ class JobService:
     def __init__(self) -> None:
         self.yc = YCombinatorCrawler()
         self.hn = HackerNewsCrawler()
+        self.waas = WorkAtStartupCrawler()
         self._crawlers = {
             "ycombinator": self.yc,
             "hackernews": self.hn,
+            "workatastartup": self.waas,
         }
 
     async def close(self) -> None:
@@ -50,6 +53,8 @@ class JobService:
                     res = await self.yc.crawl(keywords=keywords, max_pages=max_pages)
                 elif key == "hackernews":
                     res = await self.hn.crawl(keywords=keywords, max_pages=max_pages, per_page_limit=per_source_limit)
+                elif key == "workatastartup":
+                    res = await self.waas.crawl(keywords=keywords, max_pages=max_pages, per_page_limit=per_source_limit)
                 else:
                     res = await self._crawlers[key].crawl(keywords=keywords)
 
