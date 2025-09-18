@@ -5,11 +5,11 @@ async def main():
     async with JobService(cache_ttl_seconds=300) as svc:
         jobs = await svc.search_jobs(
             keywords=None,
-            sources=["hackernews_jobs"],  # isolate a single source first
+            sources=["ycombinator"],  # isolate a single source first
             location="",
             remote_only=False,
             max_pages=1,
-            per_source_limit=40,
+            per_source_limit=100,
         )
         print("Fetched:", len(jobs))
         if jobs:
