@@ -311,7 +311,6 @@ class JobService:
                 j.source_key = source_key
         return jobs
 
-<<<<<<< HEAD
     # ------------- Enrichment -------------
 
     def _get_domain_sem(self, domain: str) -> asyncio.Semaphore:
@@ -381,7 +380,6 @@ class JobService:
                         return job
 
             return await asyncio.gather(*(enrich_one(j) for j in jobs))    # ------------- Filters & Dedupe -------------
-=======
     # --------------------
     # Finite streaming (page-by-page)
     # --------------------
@@ -530,7 +528,6 @@ class JobService:
         if jid:
             return f"{source}:{url}::{jid}"
         return f"{source}:{url}"
->>>>>>> feature/work-at-startup-crawler
 
     def _normalize_tags(self, tags: Optional[List[str]]) -> List[str]:
         if not tags:
@@ -550,14 +547,12 @@ class JobService:
         """
         if not url:
             return ""
-<<<<<<< HEAD
         u = url.strip()
         u = re.sub(r"[?#](utm_[^=&]+=[^&]*&?)+", "", u, flags=re.I)
         u = re.sub(r"[?#](gh_src|ref|source|lever-source|ashby_jid|ashby_src)=[^&]*&?", "?", u, flags=re.I)
         u = re.sub(r"\?&+$", "?", u)
         u = re.sub(r"[?#]$", "", u)
         return u
-=======
         try:
             parsed = urlparse(url.strip())
             # Lowercase scheme and netloc for consistency
@@ -596,7 +591,6 @@ class JobService:
             u = re.sub(r"\?&+$", "?", u)
             u = re.sub(r"[?#]$", "", u)
             return u
->>>>>>> feature/work-at-startup-crawler
 
     def _dedupe_jobs_merge_tags(self, jobs: List[JobPosting]) -> List[JobPosting]:
         seen: Dict[Tuple[str, str], int] = {}
