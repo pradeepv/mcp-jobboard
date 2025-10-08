@@ -5,6 +5,7 @@ from .parsers.yc import YcJobParser
 from .parsers.ashby import AshbyJobParser
 from .parsers.lever import LeverJobParser
 from .parsers.greenhouse import GreenhouseJobParser
+from .parsers.generic import GenericHtmlParser
 
 __all__ = [
     "ParsedJob",
@@ -23,4 +24,5 @@ __all__ = [
     "AshbyJobParser",
     "LeverJobParser",
     "GreenhouseJobParser",
+    "GenericHtmlParser",
 ]
