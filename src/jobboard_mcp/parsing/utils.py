@@ -65,3 +65,61 @@ def guess_location(text: str) -> str:
         return "Remote"
     return "Unknown"
 
+
+# -------- List extraction and section classification --------
+
+_RESP_KEYS = [
+    "responsibilities",
+    "what you'll do",
+    "what you will do",
+    "duties",
+    "role",
+    "what you do",
+]
+
+_REQ_KEYS = [
+    "requirements",
+    "qualifications",
+    "what we're looking for",
+    "what we are looking for",
+    "you have",
+    "must have",
+    "nice to have",
+]
+
+_BEN_KEYS = [
+    "benefits",
+    "perks",
+    "compensation and benefits",
+]
+
+
+def classify_section(heading: str) -> str | None:
+    h = (heading or "").strip().lower()
+    if not h:
+        return None
+    if any(k in h for k in _RESP_KEYS):
+        return "responsibilities"
+    if any(k in h for k in _REQ_KEYS):
+        return "requirements"
+    if any(k in h for k in _BEN_KEYS):
+        return "benefits"
+    return None
+
+
+def extract_list_items_from_html(html: str) -> list[str]:
+    items: list[str] = []
+    soup = BeautifulSoup(html or "", "html.parser")
+    for li in soup.select("li"):
+        t = normalize_text(li.get_text(" "))
+        if t:
+            items.append(t)
+    # de-dup while preserving order
+    seen = set()
+    out: list[str] = []
+    for it in items:
+        if it in seen:
+            continue
+        seen.add(it)
+        out.append(it)
+    return out

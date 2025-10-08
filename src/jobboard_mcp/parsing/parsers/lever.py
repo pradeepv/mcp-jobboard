@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup  # type: ignore
 
 from ..models import ParsedJob, Section
 from ..registry import Parser, DetectionResult
-from ..utils import sanitize_html, normalize_text, extract_tech_stack, guess_location
+from ..utils import sanitize_html, normalize_text, extract_tech_stack, guess_location, classify_section, extract_list_items_from_html
 
 
 class LeverJobParser(Parser):
@@ -76,6 +76,21 @@ class LeverJobParser(Parser):
         if job.descriptionText:
             job.techStack = extract_tech_stack(job.descriptionText)
 
+        # Extract lists by section heading classification
+        for s in sections:
+            kind = classify_section(s.heading)
+            if not kind or not s.html:
+                continue
+            items = extract_list_items_from_html(s.html)
+            if not items:
+                continue
+            if kind == "requirements":
+                job.requirements.extend(items)
+            elif kind == "responsibilities":
+                job.responsibilities.extend(items)
+            elif kind == "benefits":
+                job.benefits.extend(items)
+
         # Basic scoring
         score = 0
         if job.title:
@@ -89,4 +104,3 @@ class LeverJobParser(Parser):
         job.contentScore = min(100, score)
 
         return job
-
