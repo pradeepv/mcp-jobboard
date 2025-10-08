@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 
 from ..models.job import JobPosting
 from bs4 import BeautifulSoup  # type: ignore
-from ..parsing import ParserRegistry, YcJobParser
+from ..parsing import ParserRegistry, YcJobParser, AshbyJobParser
 from ..crawlers.base import BaseCrawler
 from ..crawlers.ycombinator import YCombinatorCrawler
 from ..crawlers.hackernews import HackerNewsCrawler
@@ -178,21 +178,20 @@ class JobService:
                 )
                 return job_posting
 
-            if use_yc_parser:
-                # Use the new parser registry with YC parser first
-                soup = BeautifulSoup(html_content, "html.parser")
-                registry = ParserRegistry()
-                registry.register(YcJobParser())
+            # Use the parser registry for YC and Ashby (and future parsers)
+            soup = BeautifulSoup(html_content, "html.parser")
+            registry = ParserRegistry()
+            registry.register(YcJobParser())
+            registry.register(AshbyJobParser())
+            try:
                 parser, det = registry.choose(url, soup)
                 parsed = parser.parse(url, soup)
-
-                # Map ParsedJob -> JobPosting (existing schema) for now
                 description = parsed.descriptionText or parsed.descriptionHtml or ""
                 if description and len(description) > 5000:
                     description = description[:5000] + "..."
                 job_posting = JobPosting(
                     url=url,
-                    source=parsed.source or "Y Combinator",
+                    source=parsed.source or ("Y Combinator" if use_yc_parser else ""),
                     title=parsed.title or "Job Posting",
                     company=parsed.company or "Unknown",
                     location=parsed.location or "Unknown",
@@ -201,10 +200,10 @@ class JobService:
                     remote_ok=(parsed.location or "").lower().find("remote") >= 0,
                 )
                 return job_posting
-
-            # Fallback: old generic extractor
-            job_posting = self._extract_job_details_from_html(html_content, url)
-            return job_posting
+            except Exception:
+                # Fallback: old generic extractor
+                job_posting = self._extract_job_details_from_html(html_content, url)
+                return job_posting
 
         finally:
             await crawler.close_session()

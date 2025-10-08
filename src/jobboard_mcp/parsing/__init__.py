@@ -2,6 +2,7 @@ from .models import ParsedJob, Section, SalaryInfo, CompanyProfile
 from .registry import ParserRegistry, Parser, DetectionResult
 from .utils import sanitize_html, normalize_text, extract_tech_stack, normalize_salary, guess_location
 from .parsers.yc import YcJobParser
+from .parsers.ashby import AshbyJobParser
 
 __all__ = [
     "ParsedJob",
@@ -17,4 +18,5 @@ __all__ = [
     "normalize_salary",
     "guess_location",
     "YcJobParser",
+    "AshbyJobParser",
 ]
