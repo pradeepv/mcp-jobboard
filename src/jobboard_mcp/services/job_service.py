@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from ..models.job import JobPosting
+from ..crawlers.base import BaseCrawler
 from ..crawlers.ycombinator import YCombinatorCrawler
 from ..crawlers.hackernews import HackerNewsCrawler
 from ..crawlers.workatastartup import WorkAtStartupCrawler
+from ..crawlers.yc_companies import YCCompaniesCrawler
 
 
 class JobService:
@@ -15,18 +17,35 @@ class JobService:
     Facade for aggregating jobs from multiple crawlers.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cache_ttl_seconds: int = 600) -> None:
         self.yc = YCombinatorCrawler()
         self.hn = HackerNewsCrawler()
         self.waas = WorkAtStartupCrawler()
+        self.yc_companies = YCCompaniesCrawler()
         self._crawlers = {
             "ycombinator": self.yc,
             "hackernews": self.hn,
             "workatastartup": self.waas,
+            "yc_companies": self.yc_companies,
         }
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._instances: Dict[str, BaseCrawler] = {}
+        self._domain_semaphores: Dict[str, asyncio.Semaphore] = {}
+        self._global_sem = asyncio.Semaphore(10)
 
     async def close(self) -> None:
-        await asyncio.gather(*(c.close_session() for c in self._crawlers.values()), return_exceptions=True)
+        """Close all crawler sessions."""
+        await asyncio.gather(
+            *(c.close_session() for c in self._crawlers.values()),
+            return_exceptions=True,
+        )
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+        return False
 
     async def search_jobs(
         self,
@@ -52,9 +71,17 @@ class JobService:
                 if key == "ycombinator":
                     res = await self.yc.crawl(keywords=keywords, max_pages=max_pages)
                 elif key == "hackernews":
-                    res = await self.hn.crawl(keywords=keywords, max_pages=max_pages, per_page_limit=per_source_limit)
+                    res = await self.hn.crawl(
+                        keywords=keywords,
+                        max_pages=max_pages,
+                        per_page_limit=per_source_limit,
+                    )
                 elif key == "workatastartup":
-                    res = await self.waas.crawl(keywords=keywords, max_pages=max_pages, per_page_limit=per_source_limit)
+                    res = await self.waas.crawl(
+                        keywords=keywords,
+                        max_pages=max_pages,
+                        per_page_limit=per_source_limit,
+                    )
                 else:
                     res = await self._crawlers[key].crawl(keywords=keywords)
 
@@ -63,7 +90,10 @@ class JobService:
                     if remote_only and not j.remote_ok:
                         continue
                     if location and location.strip():
-                        if location.lower() not in f"{j.location} {j.description}".lower():
+                        if (
+                            location.lower()
+                            not in f"{j.location} {j.description}".lower()
+                        ):
                             continue
                     out.append(j)
                 counts[key] = len(out)
@@ -88,6 +118,15 @@ class JobService:
         }
         return {"jobs": jobs, "metadata": metadata}
 
+    def _canonical_key(self, job: JobPosting) -> str:
+        """Generate a canonical key for deduplication."""
+        # Use URL as primary key if available
+        if job.url:
+            return job.url
+
+        # Fallback to title + company combination
+        return f"{job.title}@{job.company}"
+
     def _dedupe_jobs(self, jobs: List[JobPosting]) -> List[JobPosting]:
         seen = set()
         out: List[JobPosting] = []
@@ -99,6 +138,222 @@ class JobService:
             out.append(j)
         return out
 
-    def _canonical_key(self, j: JobPosting) -> str:
-        url = (j.url or "").split("#", 1)[0].strip().lower()
-        return f"{j.source.lower()}|{url}"
+    async def parse_job_url(self, url: str) -> JobPosting:
+        """
+        Parse a single job URL and extract job details.
+
+        Args:
+            url: The URL of the job posting to parse
+
+        Returns:
+            JobPosting with extracted details
+        """
+        from urllib.parse import urlparse
+
+        # Check if this is a YC company job URL and use specialized crawler
+        if 'ycombinator.com/companies/' in url and '/jobs/' in url:
+            try:
+                job = await self.yc_companies.parse_job_url(url)
+                if job:
+                    return job
+            except Exception as e:
+                # Fallback to generic parsing if YC crawler fails
+                pass
+
+        # Create a temporary crawler instance for fetching the page
+        crawler = BaseCrawler()
+        await crawler._ensure_session()
+
+        try:
+            # Fetch the HTML content
+            html_content = await crawler.get_text(url)
+            if not html_content:
+                # Create a basic job posting when content cannot be fetched
+                parsed = urlparse(url)
+                host = parsed.hostname or "unknown"
+                job_posting = JobPosting(
+                    url=url,
+                    source=host,
+                    title=f"Job at {host}",
+                    company=host,
+                    location="Location Not Specified",
+                    description=f"Could not fetch content from {url}",
+                    salary=None,
+                    remote_ok=False,
+                )
+                return job_posting
+
+            # Parse the HTML content to extract job details
+            job_posting = self._extract_job_details_from_html(html_content, url)
+            return job_posting
+
+        finally:
+            await crawler.close_session()
+
+    def _extract_job_details_from_html(self, html_content: str, url: str) -> JobPosting:
+        """
+        Extract job details from HTML content using BeautifulSoup.
+
+        Args:
+            html_content: The HTML content of the job posting page
+            url: The URL of the job posting
+
+        Returns:
+            JobPosting with extracted details
+        """
+        try:
+            from bs4 import BeautifulSoup
+            import re
+            from urllib.parse import urlparse
+
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # Extract domain for source
+            parsed_url = urlparse(url)
+            source = parsed_url.netloc
+
+            # Remove common navigation/script elements
+            for element in soup(["script", "style", "nav", "header", "footer"]):
+                element.decompose()
+
+            # Try to extract title (look for common title selectors)
+            title = None
+            title_selectors = [
+                "h1",
+                '[data-testid="job-title"]',
+                ".job-title",
+                '[class*="title"]',
+                "title",
+            ]
+
+            for selector in title_selectors:
+                element = soup.select_one(selector)
+                if element and element.get_text(strip=True):
+                    title = element.get_text(strip=True)
+                    break
+
+            # If no title found, try meta tags
+            if not title:
+                title_meta = soup.find("meta", attrs={"name": "title"}) or soup.find(
+                    "meta", attrs={"property": "og:title"}
+                )
+                if title_meta:
+                    title = title_meta.get("content", "")
+
+            # Try to extract company name
+            company = None
+            company_selectors = [
+                '[data-testid="company-name"]',
+                ".company-name",
+                '[class*="company"]',
+                "[data-company]",
+            ]
+
+            for selector in company_selectors:
+                element = soup.select_one(selector)
+                if element and element.get_text(strip=True):
+                    company = element.get_text(strip=True)
+                    break
+
+            # Try to extract location
+            location = None
+            location_selectors = [
+                '[data-testid="job-location"]',
+                ".job-location",
+                '[class*="location"]',
+                "[data-location]",
+            ]
+
+            for selector in location_selectors:
+                element = soup.select_one(selector)
+                if element and element.get_text(strip=True):
+                    location = element.get_text(strip=True)
+                    break
+
+            # Try to extract salary
+            salary = None
+            salary_selectors = [
+                '[data-testid="job-salary"]',
+                ".job-salary",
+                '[class*="salary"]',
+                "[data-salary]",
+            ]
+
+            for selector in salary_selectors:
+                element = soup.select_one(selector)
+                if element and element.get_text(strip=True):
+                    salary = element.get_text(strip=True)
+                    break
+
+            # Extract description (main content)
+            description = ""
+            # Look for common job description containers
+            description_selectors = [
+                '[data-testid="job-description"]',
+                ".job-description",
+                '[class*="description"]',
+                '[class*="job-posting"]',
+                "main",
+                "article",
+                ".content",
+            ]
+
+            for selector in description_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    # Get text content and clean it up
+                    desc_text = element.get_text(separator=" ", strip=True)
+                    if len(desc_text) > len(description):
+                        description = desc_text
+
+            # If still no description, get body text
+            if not description:
+                body = soup.find("body")
+                if body:
+                    description = body.get_text(separator=" ", strip=True)
+
+            # Limit description length to prevent oversized responses
+            if len(description) > 5000:
+                description = description[:5000] + "..."
+
+            # Create job posting object
+            job_posting = JobPosting(
+                url=url,
+                source=source,
+                title=title or "Job Posting",
+                company=company or "Unknown Company",
+                location=location or "Location Not Specified",
+                description=description or "No description available",
+                salary=salary,
+                remote_ok="remote" in (description + " " + (title or "")).lower(),
+            )
+
+            print(
+                f"[DEBUG] _extract_job_details_from_html returning: {type(job_posting)}",
+                file=sys.stderr,
+            )
+            return job_posting
+
+        except Exception as e:
+            # If parsing fails, create a basic job posting with URL info
+            from urllib.parse import urlparse
+
+            parsed = urlparse(url)
+            host = parsed.hostname or "unknown"
+
+            job_posting = JobPosting(
+                url=url,
+                source=host,
+                title=f"Job at {host}",
+                company=host,
+                location="Location Not Specified",
+                description=f"Could not parse job details from {url}. Error: {str(e)}",
+                salary=None,
+                remote_ok=False,
+            )
+
+            print(
+                f"[DEBUG] _extract_job_details_from_html returning fallback: {type(job_posting)}",
+                file=sys.stderr,
+            )
+            return job_posting

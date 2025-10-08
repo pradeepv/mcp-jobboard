@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 @dataclass
 class JobPosting:
@@ -32,3 +32,23 @@ class JobPosting:
 
     # New: internal routing key for JobService/crawlers (e.g., "ycombinator", "hackernews_jobs")
     source_key: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to standardized dictionary format."""
+        from ..utils.fallback import assess_data_quality, to_standardized_dict
+        return to_standardized_dict(self)
+
+    def __post_init__(self):
+        """Post-initialization validation and cleanup."""
+        # Ensure critical fields have sensible values
+        if not self.title:
+            self.title = "Job Posting"
+        if not self.company:
+            self.company = "Unknown Company"
+        if not self.source:
+            self.source = "Unknown"
+
+        # Ensure ID is set
+        if not self.id:
+            from ..utils.fallback import generate_fallback_id
+            self.id = generate_fallback_id(self.__dict__)
