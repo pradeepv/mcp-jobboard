@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from ..models.job import JobPosting
+from bs4 import BeautifulSoup  # type: ignore
+from ..parsing import ParserRegistry, YcJobParser
 from ..crawlers.base import BaseCrawler
 from ..crawlers.ycombinator import YCombinatorCrawler
 from ..crawlers.hackernews import HackerNewsCrawler
@@ -150,15 +152,8 @@ class JobService:
         """
         from urllib.parse import urlparse
 
-        # Check if this is a YC company job URL and use specialized crawler
-        if 'ycombinator.com/companies/' in url and '/jobs/' in url:
-            try:
-                job = await self.yc_companies.parse_job_url(url)
-                if job:
-                    return job
-            except Exception as e:
-                # Fallback to generic parsing if YC crawler fails
-                pass
+        # Check if this is a YC company job URL and prefer our YC parser path
+        use_yc_parser = ('ycombinator.com/companies/' in url and '/jobs/' in url)
 
         # Create a temporary crawler instance for fetching the page
         crawler = BaseCrawler()
@@ -183,7 +178,31 @@ class JobService:
                 )
                 return job_posting
 
-            # Parse the HTML content to extract job details
+            if use_yc_parser:
+                # Use the new parser registry with YC parser first
+                soup = BeautifulSoup(html_content, "html.parser")
+                registry = ParserRegistry()
+                registry.register(YcJobParser())
+                parser, det = registry.choose(url, soup)
+                parsed = parser.parse(url, soup)
+
+                # Map ParsedJob -> JobPosting (existing schema) for now
+                description = parsed.descriptionText or parsed.descriptionHtml or ""
+                if description and len(description) > 5000:
+                    description = description[:5000] + "..."
+                job_posting = JobPosting(
+                    url=url,
+                    source=parsed.source or "Y Combinator",
+                    title=parsed.title or "Job Posting",
+                    company=parsed.company or "Unknown",
+                    location=parsed.location or "Unknown",
+                    description=description or "",
+                    salary=None,
+                    remote_ok=(parsed.location or "").lower().find("remote") >= 0,
+                )
+                return job_posting
+
+            # Fallback: old generic extractor
             job_posting = self._extract_job_details_from_html(html_content, url)
             return job_posting
 
