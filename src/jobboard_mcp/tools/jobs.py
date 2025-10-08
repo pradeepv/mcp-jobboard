@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Callable
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Callable,
+)
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 from ..crawlers.base import BaseCrawler
@@ -15,45 +24,54 @@ from ..models.job import JobPosting
 # ATS handler registry
 # --------------------
 
-# --------------------
-# ATS handler registry
-# --------------------
-
 ATS_HANDLER: Dict[str, Callable[[JobPosting, str], JobPosting]] = {}
+
 
 def register_ats(domain: str):
     def deco(fn: Callable[[JobPosting, str], JobPosting]):
         ATS_HANDLER[domain.lower()] = fn
         return fn
+
     return deco
 
+
 def text_collapse(text: str) -> str:
-    # collapse excessive blank lines, normalize bullets lightly
+    # Collapse excessive blank lines and normalize bullets lightly
     text = re.sub(r"\r\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    # also collapse excessive spaces before newlines
     text = re.sub(r"[ \t]+\n", "\n", text)
     return text.strip()
 
+
 try:
     from bs4 import BeautifulSoup
-except Exception:
-    BeautifulSoup = None  # type: ignore
+except ImportError:
+    raise ImportError(
+        "BeautifulSoup is required but not installed. Please install it using `pip install beautifulsoup4`."
+    )
+
+# --------------------
+# ATS Parsing Functions
+# --------------------
+
 
 @register_ats("jobs.ashbyhq.com")
 @register_ats("www.ashbyhq.com")
 def parse_ashby(job: JobPosting, html: str) -> JobPosting:
-    if not BeautifulSoup:
-        return job
-
     soup = BeautifulSoup(html, "html.parser")
 
-    # Remove obvious chrome to avoid picking massive non-description areas
-    for sel in ["header", "nav", "footer", "[role='navigation']", "[role='banner']", "[role='contentinfo']"]:
+    # Remove irrelevant elements
+    for sel in [
+        "header",
+        "nav",
+        "footer",
+        "[role='navigation']",
+        "[role='banner']",
+        "[role='contentinfo']",
+    ]:
         for el in soup.select(sel):
             el.decompose()
 
-    # Common Ashby containers (cover multiple tenant themes)
     selectors = [
         '[data-testid="job-posting__description"]',
         '[data-test="job-posting__description"]',
@@ -62,8 +80,8 @@ def parse_ashby(job: JobPosting, html: str) -> JobPosting:
         ".JobPosting__Description",
         ".Posting__Description",
         ".posting-description",
-        ".prose",                 # tailwind prose
-        ".ProseMirror",           # editor output
+        ".prose",
+        ".ProseMirror",
         "article",
         "main",
         ".content",
@@ -77,16 +95,17 @@ def parse_ashby(job: JobPosting, html: str) -> JobPosting:
             node = cand
             break
 
-    # Heuristic fallback: choose the largest text block inside <main> or whole page
     def biggest_text_block(root):
         candidates = []
         for el in root.find_all(["div", "section", "article"]):
-            # Skip elements that are likely layout-only
             classes = " ".join(el.get("class", [])).lower()
-            if any(c in classes for c in ["header", "nav", "footer", "sidebar", "apply", "application"]):
+            if any(
+                c in classes
+                for c in ["header", "nav", "footer", "sidebar", "apply", "application"]
+            ):
                 continue
             text = el.get_text(" ", strip=True)
-            if text and len(text) > 400:  # avoid trivial blocks
+            if text and len(text) > 400:
                 candidates.append((len(text), el))
         if not candidates:
             return None
@@ -94,18 +113,16 @@ def parse_ashby(job: JobPosting, html: str) -> JobPosting:
         return candidates[0][1]
 
     if not node:
-        root = soup.select_one("main") or soup  # prefer main region
+        root = soup.select_one("main") or soup
         node = biggest_text_block(root) or biggest_text_block(soup)
 
     if node:
-        # Clean out script/style/noscript
         for bad in node.find_all(["script", "style", "noscript"]):
             bad.decompose()
         text = node.get_text("\n", strip=True)
         if text:
             job.description = text_collapse(text)
 
-    # Salary and remote hints
     blob = soup.get_text(" ", strip=True)
     m = re.search(r"(Salary|Compensation|Pay|Base)\s*[:\-]\s*([^\n]+)", blob, re.I)
     if m and not job.salary:
@@ -114,12 +131,10 @@ def parse_ashby(job: JobPosting, html: str) -> JobPosting:
 
     return job
 
+
 @register_ats("boards.greenhouse.io")
 def parse_greenhouse(job: JobPosting, html: str) -> JobPosting:
-    if not BeautifulSoup:
-        return job
     soup = BeautifulSoup(html, "html.parser")
-    # Greenhouse has fairly consistent containers but varies per company theme
     node = (
         soup.select_one("#content")
         or soup.select_one(".content")
@@ -137,54 +152,105 @@ def parse_greenhouse(job: JobPosting, html: str) -> JobPosting:
         job.salary = m.group(2).strip()
     return job
 
-@register_ats("jobs.lever.co")
-def parse_lever(job: JobPosting, html: str) -> JobPosting:
-    if not BeautifulSoup:
-        return job
-    soup = BeautifulSoup(html, "html.parser")
-    node = soup.select_one(".description, .section.page, .content, .content-container, .posting") or soup.find(id="job")
-    if node:
-        job.description = text_collapse(node.get_text("\n", strip=True))
-    blob = soup.get_text(" ", strip=True)
-    m = re.search(r"(Salary|Compensation|Pay)\s*[:\-]\s*([^\n]+)", blob, re.I)
-    if m and not job.salary:
-        job.salary = m.group(2).strip()
-    job.remote_ok = job.remote_ok or ("remote" in blob.lower())
-    return job
 
-@register_ats("www.workatastartup.com")
-def parse_workatastartup(job: JobPosting, html: str) -> JobPosting:
-    if not BeautifulSoup:
-        return job
+@register_ats("www.ycombinator.com")
+def parse_ycombinator(job: JobPosting, html: str) -> JobPosting:
+    """
+    Parse Y Combinator job posting pages.
+    """
+    import sys
+
     soup = BeautifulSoup(html, "html.parser")
-    node = (
-        soup.select_one(".job-detail, .job, main, article, #__next main")
-        or soup.find("main")
-        or soup.find("article")
+
+    # Remove irrelevant elements
+    for sel in [
+        "header",
+        "nav",
+        "footer",
+        "[role='navigation']",
+        "[role='banner']",
+        "[role='contentinfo']",
+    ]:
+        for el in soup.select(sel):
+            el.decompose()
+
+    # Extract job title (usually in an h1)
+    title_element = soup.select_one("h1")
+    if title_element:
+        job.title = title_element.get_text(strip=True)
+
+    # Extract company name (usually in a heading or div with company info)
+    company_elements = soup.select(
+        "[data-testid='company-name'], .company-name, h2, .company"
     )
-    if node:
-        job.description = text_collapse(node.get_text("\n", strip=True))
-    if "remote" in soup.get_text(" ", strip=True).lower():
-        job.remote_ok = True
+    for el in company_elements:
+        if el and el.get_text(strip=True):
+            job.company = el.get_text(strip=True)
+            break
+
+    # Extract location
+    location_elements = soup.select(
+        "[data-testid='job-location'], .job-location, [class*='location']"
+    )
+    for el in location_elements:
+        if el and el.get_text(strip=True):
+            job.location = el.get_text(strip=True)
+            break
+
+    # Extract salary
+    salary_elements = soup.select(
+        "[data-testid='job-salary'], .job-salary, [class*='salary']"
+    )
+    for el in salary_elements:
+        if el and el.get_text(strip=True):
+            job.salary = el.get_text(strip=True)
+            break
+
+    # Extract job description (main content)
+    description_selectors = [
+        '[data-testid="job-description"]',
+        ".job-description",
+        '[class*="description"]',
+        '[class*="job-posting"]',
+        "main",
+        "article",
+        ".content",
+    ]
+
+    for selector in description_selectors:
+        element = soup.select_one(selector)
+        if element:
+            # Get text content and clean it up
+            desc_text = element.get_text(separator=" ", strip=True)
+            if len(desc_text) > len(job.description or ""):
+                job.description = desc_text
+
+    # If still no description, get body text
+    if not job.description:
+        body = soup.find("body")
+        if body:
+            job.description = body.get_text(separator=" ", strip=True)
+
+    # Limit description length to prevent oversized responses
+    if job.description and len(job.description) > 5000:
+        job.description = job.description[:5000] + "..."
+
+    # Check for remote opportunities
+    job.remote_ok = job.remote_ok or (
+        "remote" in (job.description + " " + (job.title or "")).lower()
+    )
+
     return job
 
-@register_ats("deepnote.com")
-def parse_deepnote(job: JobPosting, html: str) -> JobPosting:
-    if not BeautifulSoup:
-        return job
-    soup = BeautifulSoup(html, "html.parser")
-    node = soup.select_one("main, article, [data-page], .careers, .jobs")
-    if node:
-        job.description = text_collapse(node.get_text("\n", strip=True))
-    if "remote" in soup.get_text(" ", strip=True).lower():
-        job.remote_ok = True
-    return job
+
+# Additional ATS parsers (e.g., Lever, WorkAtStartup, etc.) can be added here...
+
+# --------------------
+# Job Service Class
+# --------------------
+
 
 class JobService:
-    """
-    Aggregates job crawlers behind one interface with filtering, dedupe, and enrichment.
-    """
-
     SOURCE_MAP: Dict[str, type] = {
         "hackernews_jobs": HackerNewsJobsCrawler,
         "ycombinator": YCombinatorCrawler,
@@ -194,40 +260,125 @@ class JobService:
     def __init__(self, cache_ttl_seconds: int = 600):
         self.cache_ttl_seconds = cache_ttl_seconds
         self._instances: Dict[str, BaseCrawler] = {}
-        # Per-domain concurrency and global cap
         self._domain_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._global_sem = asyncio.Semaphore(10)
 
-    async def __aenter__(self) -> "JobService":
-        return self
+    async def search_jobs_stream(
+        self,
+        keywords: Optional[List[str]],
+        sources: List[str],
+        location: str,
+        remote_only: bool,
+        max_pages: int = 1,
+        per_source_limit: int = 100,
+        tags: Optional[List[str]] = None,
+        enrich: bool = True,
+        enrich_limit: Optional[int] = 50,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream job search results as events."""
+        if not sources:
+            return
 
-    async def __aexit__(self, exc_type, exc, tb):
-        await self.aclose()
+        requested_sources = [s.lower().strip() for s in sources]
+        req_tags_norm = self._normalize_tags(tags)
 
-    async def aclose(self):
-        for inst in self._instances.values():
-            close = getattr(inst, "close_session", None)
-            if callable(close):
-                try:
-                    await close()
-                    continue
-                except Exception:
-                    pass
-            aclose = getattr(inst, "aclose", None)
-            if callable(aclose):
-                try:
-                    await aclose()
-                except Exception:
-                    pass
+        # Emit start event
+        yield {
+            "type": "start",
+            "sources": requested_sources,
+            "max_pages": max_pages,
+            "per_source_limit": per_source_limit,
+            "remote_only": remote_only,
+            "location": location,
+        }
 
-    def _get_instance(self, key: str) -> BaseCrawler:
-        key_l = key.lower()
-        if key_l not in self.SOURCE_MAP:
-            raise ValueError(f"Unknown source: {key}")
-        if key_l not in self._instances:
-            cls = self.SOURCE_MAP[key_l]
-            self._instances[key_l] = cls()  # type: ignore[call-arg]
-        return self._instances[key_l]
+        total_jobs = 0
+        total_pages = 0
+
+        for src in requested_sources:
+            # Emit source start event
+            yield {"type": "source_start", "source": src}
+
+            source_jobs = []
+            source_pages = 0
+
+            try:
+                # Run the source and get all jobs
+                jobs = await self._run_source(
+                    src, keywords, max_pages, per_source_limit
+                )
+
+                # Filter jobs based on criteria
+                filtered_jobs = [
+                    j
+                    for j in jobs
+                    if (not remote_only or getattr(j, "remote_ok", False))
+                    and (not location or self._location_match(j, location))
+                    and (not req_tags_norm or self._has_required_tags(j, req_tags_norm))
+                ]
+
+                # Emit page start event (simplified - treating all as one page for streaming)
+                yield {"type": "page_start", "source": src, "page": 1}
+
+                # Emit job events
+                for job in filtered_jobs:
+                    yield {
+                        "type": "job",
+                        "source": src,
+                        "page": 1,
+                        "key": f"{src}:{job.url}",
+                        "data": {
+                            "id": job.id,
+                            "source": job.source,
+                            "url": job.url,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "description": job.description,
+                            "posted_date": job.posted_date,
+                            "salary": job.salary,
+                            "job_type": job.job_type,
+                            "remote_ok": job.remote_ok,
+                            "requirements": job.requirements,
+                            "seniority": job.seniority,
+                            "tags": job.tags,
+                            "raw_html": job.raw_html,
+                            "source_key": job.source_key,
+                        },
+                    }
+                    source_jobs.append(job)
+
+                # Emit page complete event
+                yield {
+                    "type": "page_complete",
+                    "source": src,
+                    "page": 1,
+                    "count": len(source_jobs),
+                }
+
+                source_pages = 1
+                total_jobs += len(source_jobs)
+                total_pages += source_pages
+
+                # Emit source complete event
+                yield {
+                    "type": "source_complete",
+                    "source": src,
+                    "pages": source_pages,
+                    "total": len(source_jobs),
+                }
+
+            except Exception as e:
+                # Emit error event
+                yield {"type": "error", "source": src, "page": 1, "message": str(e)}
+
+        # Emit complete event
+        yield {
+            "type": "complete",
+            "total_jobs": total_jobs,
+            "sources": len(requested_sources),
+            "pages": total_pages,
+        }
 
     async def search_jobs(
         self,
@@ -247,7 +398,10 @@ class JobService:
         requested_sources = [s.lower().strip() for s in sources]
         req_tags_norm = self._normalize_tags(tags)
 
-        tasks = [self._run_source(src, keywords, max_pages, per_source_limit) for src in requested_sources]
+        tasks = [
+            self._run_source(src, keywords, max_pages, per_source_limit)
+            for src in requested_sources
+        ]
         results_lists = await asyncio.gather(*tasks, return_exceptions=True)
 
         jobs: List[JobPosting] = []
@@ -256,413 +410,360 @@ class JobService:
                 print(f"[WARN] source {src} failed: {res}")
                 continue
 
-            kept = []
-            for j in res:
-                if remote_only and not getattr(j, "remote_ok", False):
-                    continue
-                if location and not self._location_match(j, location):
-                    continue
-                if req_tags_norm and not self._has_required_tags(j, req_tags_norm):
-                    continue
-                kept.append(j)
-            jobs.extend(kept)
+            filtered = [
+                j
+                for j in res
+                if (not remote_only or getattr(j, "remote_ok", False))
+                and (not location or self._location_match(j, location))
+                and (not req_tags_norm or self._has_required_tags(j, req_tags_norm))
+            ]
+            jobs.extend(filtered)
 
         deduped = self._dedupe_jobs_merge_tags(jobs)
 
-        if enrich and deduped:
-            limit = enrich_limit if enrich_limit is not None else 50
-            subset = deduped[:limit]
+        if enrich:
+            subset = deduped[:enrich_limit]
             try:
                 enriched_subset = await self.enrich_details(subset)
-                deduped[:len(enriched_subset)] = enriched_subset
+                deduped[: len(enriched_subset)] = enriched_subset
             except Exception as e:
                 print(f"[WARN] enrich failed: {e}")
 
         return deduped
 
+    def _normalize_tags(self, tags: Optional[List[str]]) -> List[str]:
+        if not tags:
+            return []
+        return [t.strip().lower() for t in tags if t.strip()]
+
+    def _location_match(self, job: JobPosting, want: str) -> bool:
+        """
+        Check if the desired location is mentioned in the job's location,
+        title, or description.
+        """
+        want_norm = want.strip().lower()
+        blob = " ".join(
+            [
+                getattr(job, "location", ""),
+                getattr(job, "title", ""),
+                getattr(job, "description", ""),
+            ]
+        ).lower()
+        return want_norm in blob
+
+    def _has_required_tags(self, job: JobPosting, required_tags: List[str]) -> bool:
+        """Check if job has all required tags"""
+        job_tags = getattr(job, "tags", [])
+        if not job_tags:
+            return False
+        job_tags = [t.strip().lower() for t in job_tags]
+        return all(tag in job_tags for tag in required_tags)
+
+    def _dedupe_jobs_merge_tags(self, jobs: List[JobPosting]) -> List[JobPosting]:
+        """Remove duplicate jobs and merge tags"""
+        seen = {}
+        for job in jobs:
+            # Use URL as primary key for deduplication
+            key = job.url
+            if key in seen:
+                # Merge tags
+                existing_tags = seen[key].tags or []
+                new_tags = job.tags or []
+                seen[key].tags = list(set(existing_tags + new_tags))
+            else:
+                seen[key] = job
+        return list(seen.values())
+
     async def _run_source(
         self,
-        source_key: str,
+        source: str,
         keywords: Optional[List[str]],
         max_pages: int,
         per_source_limit: int,
     ) -> List[JobPosting]:
-        inst = self._get_instance(source_key)
+        """Run a specific source crawler and return job listings"""
+        if source not in self.SOURCE_MAP:
+            raise ValueError(f"Unknown source: {source}")
+
+        if source not in self._instances:
+            self._instances[source] = self.SOURCE_MAP[source]()
+
+        crawler = self._instances[source]
+
+        # Initialize crawler if needed
+        if hasattr(crawler, "initialize"):
+            await crawler.initialize()
+
+        # Get job listings
+        jobs = []
         try:
-            jobs = await inst.crawl(
-                keywords=keywords,
-                max_pages=max_pages,
-                per_page_limit=per_source_limit,
-            )
-        except TypeError:
-            try:
-                jobs = await inst.crawl(
+            job_list = []
+            if source == "ycombinator":
+                # YC crawler doesn't take per_page_limit
+                job_list = await crawler.crawl(keywords=keywords, max_pages=max_pages)
+            else:
+                # Other crawlers take per_page_limit
+                job_list = await crawler.crawl(
                     keywords=keywords,
                     max_pages=max_pages,
+                    per_page_limit=per_source_limit,
                 )
-            except TypeError:
-                jobs = await inst.crawl()  # type: ignore
+            jobs.extend(job_list)
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch jobs from {source}: {e}")
+            raise
 
-        if per_source_limit and len(jobs) > per_source_limit:
-            jobs = jobs[:per_source_limit]
-        # ensure source_key is set if crawler forgot
-        for j in jobs:
-            if not getattr(j, "source_key", None):
-                j.source_key = source_key
         return jobs
 
-    # ------------- Enrichment -------------
-
-    def _get_domain_sem(self, domain: str) -> asyncio.Semaphore:
-        dom = domain.lower()
-        if dom not in self._domain_semaphores:
-            # Default to 4 concurrent per domain
-            self._domain_semaphores[dom] = asyncio.Semaphore(4)
-        return self._domain_semaphores[dom]
-
     async def enrich_details(self, jobs: List[JobPosting]) -> List[JobPosting]:
-            seen_debug = {"count": 0}  # closure state for light debug
+        """Enrich job details by fetching and parsing job URLs"""
+        enriched_jobs = []
 
-            async def enrich_one(job: JobPosting) -> JobPosting:
-                if not job.url or (job.description and job.description.strip()):
-                    return job
-
-                parsed = urlparse(job.url)
-                domain = parsed.netloc.lower()
-
-                handler = ATS_HANDLER.get(domain)
-                if not handler:
-                    # debug for first items
-                    if seen_debug["count"] < 15:
-                        print(f"[enrich] skip: no handler for domain={domain} url={job.url}")
-                        seen_debug["count"] += 1
-                    return job
-
-                # Choose a session: reuse the crawler session if possible
-                crawler = None
-                if job.source_key:
-                    crawler = self._instances.get(job.source_key)
-
-                async def fetch_html() -> Optional[str]:
-                    try:
-                        if crawler:
-                            return await crawler.get_text(job.url, timeout=20)
-                        if self._instances:
-                            any_crawler = next(iter(self._instances.values()))
-                            return await any_crawler.get_text(job.url, timeout=20)
-                    except Exception as e:
-                        if seen_debug["count"] < 15:
-                            print(f"[enrich] fetch error for {domain}: {e}")
-                            seen_debug["count"] += 1
-                        return None
-                    return None
-
-                # Respect concurrency limits
-                dom_sem = self._get_domain_sem(domain)
-                async with self._global_sem, dom_sem:
-                    html = await fetch_html()
-                    if seen_debug["count"] < 15:
-                        print(f"[enrich] domain={domain} handler=YES html_len={len(html) if html else 0} url={job.url}")
-                        seen_debug["count"] += 1
-                    if not html:
-                        return job
-                    try:
-                        enriched = handler(job, html)
-                        # If still empty, log once
-                        if seen_debug["count"] < 15 and not (enriched.description or "").strip():
-                            print(f"[enrich] handler produced empty description for domain={domain}")
-                            seen_debug["count"] += 1
-                        return enriched
-                    except Exception as e:
-                        if seen_debug["count"] < 15:
-                            print(f"[enrich] handler error for {domain}: {e}")
-                            seen_debug["count"] += 1
-                        return job
-
-            return await asyncio.gather(*(enrich_one(j) for j in jobs))    # ------------- Filters & Dedupe -------------
-    # --------------------
-    # Finite streaming (page-by-page)
-    # --------------------
-    async def search_jobs_stream(
-        self,
-        keywords: Optional[List[str]],
-        sources: List[str],
-        location: str,
-        remote_only: bool,
-        max_pages: int = 1,
-        per_source_limit: int = 100,
-        tags: Optional[List[str]] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """
-        Yields structured events page-by-page for a finite run.
-        Event schema:
-          - start, source_start, page_start, job, page_complete, source_complete, complete, error
-        Filtering (remote_only, location, tags) is applied before yielding jobs.
-        Dedupe within a single page is implicit via source/crawler; cross-page dedupe is not applied in finite mode.
-        """
-        requested_sources = [s.lower().strip() for s in sources if s and s.strip()]
-        req_tags_norm = self._normalize_tags(tags)
-
-        yield {
-            "type": "start",
-            "sources": requested_sources,
-            "max_pages": max_pages,
-            "per_source_limit": per_source_limit,
-        }
-
-        total_jobs = 0
-        total_pages = 0
-
-        for src in requested_sources:
-            yield {"type": "source_start", "source": src}
-            source_total = 0
-            pages_emitted = 0
-
-            inst = self._get_instance(src)
-
-            # Strategy A (preferred): if crawler supports per-page crawl, use it.
-            crawl_page_fn = getattr(inst, "crawl_page", None)
-
-            for page in range(1, max_pages + 1):
-                yield {"type": "page_start", "source": src, "page": page}
-                pages_emitted += 1
-                total_pages += 1
-                page_jobs: List[JobPosting] = []
-
-                try:
-                    if callable(crawl_page_fn):
-                        # Ideal path: crawler implements crawl_page(keywords=..., page=..., per_page_limit=...)
-                        try:
-                            page_jobs = await crawl_page_fn(
-                                keywords=keywords,
-                                page=page,
-                                per_page_limit=per_source_limit,
-                            )
-                        except TypeError:
-                            # Fallback: maybe no per_page_limit arg
-                            page_jobs = await crawl_page_fn(
-                                keywords=keywords,
-                                page=page,
-                            )
-                    else:
-                        # Strategy B (compat): if no crawl_page, approximate by calling crawl up to 'page'
-                        try:
-                            all_upto_page = await inst.crawl(
-                                keywords=keywords,
-                                max_pages=page,
-                                per_page_limit=per_source_limit,
-                            )
-                        except TypeError:
-                            try:
-                                all_upto_page = await inst.crawl(
-                                    keywords=keywords,
-                                    max_pages=page,
-                                )
-                            except TypeError:
-                                all_upto_page = await inst.crawl()  # type: ignore
-
-                        # Compute the slice for "this page".
-                        if per_source_limit:
-                            start_idx = (page - 1) * per_source_limit
-                            end_idx = start_idx + per_source_limit
-                            page_jobs = all_upto_page[start_idx:end_idx]
-                        else:
-                            # Conservative default page size if unknown
-                            start_idx = (page - 1) * 50
-                            end_idx = start_idx + 50
-                            page_jobs = all_upto_page[start_idx:end_idx]
-
-                except Exception as ex:
-                    yield {"type": "error", "message": str(ex), "source": src, "page": page}
-                    yield {"type": "page_complete", "source": src, "page": page, "count": 0}
+        for job in jobs:
+            try:
+                # Skip if already has detailed description
+                if job.description and len(job.description) > 200:
+                    enriched_jobs.append(job)
                     continue
 
-                # Apply filters and emit jobs
-                emitted_count = 0
-                for j in page_jobs:
-                    if remote_only and not getattr(j, "remote_ok", False):
-                        continue
-                    if location and not self._location_match(j, location):
-                        continue
-                    if req_tags_norm and not self._has_required_tags(j, req_tags_norm):
-                        continue
+                # Fetch and parse job URL
+                parsed_job = await self.parse_job_url(job.url)
 
-                    key = self._compute_job_key(src, j)
-                    yield {
-                        "type": "job",
-                        "source": src,
-                        "page": page,
-                        "key": key,
-                        "data": self._as_obj(j),
-                    }
-                    emitted_count += 1
-                    total_jobs += 1
-                    source_total += 1
+                # Update original job with parsed details
+                if parsed_job.description:
+                    job.description = parsed_job.description
+                if parsed_job.salary:
+                    job.salary = parsed_job.salary
+                if parsed_job.location:
+                    job.location = parsed_job.location
+                if parsed_job.remote_ok is not None:
+                    job.remote_ok = parsed_job.remote_ok
 
-                yield {"type": "page_complete", "source": src, "page": page, "count": emitted_count}
+                enriched_jobs.append(job)
+            except Exception as e:
+                print(f"[WARN] Failed to enrich job {job.url}: {e}")
+                enriched_jobs.append(job)  # Add original job if enrichment fails
 
-                # Early stop for this source if empty page encountered
-                if emitted_count == 0:
+        return enriched_jobs
+
+    async def parse_job_url(self, url: str) -> JobPosting:
+        """
+        Parse a single job URL and extract job details.
+
+        Args:
+            url: The URL of the job posting to parse
+
+        Returns:
+            JobPosting with extracted details
+        """
+        # Create a temporary crawler instance for fetching the page
+        crawler = BaseCrawler()
+        await crawler._ensure_session()
+
+        try:
+            # Fetch the HTML content
+            html_content = await crawler.get_text(url)
+            if not html_content:
+                # Create a basic job posting when content cannot be fetched
+                parsed = urlparse(url)
+                host = parsed.hostname or "unknown"
+                job_posting = JobPosting(
+                    url=url,
+                    source=host,
+                    title=f"Job at {host}",
+                    company=host,
+                    location="Location Not Specified",
+                    description=f"Could not fetch content from {url}",
+                    salary=None,
+                    remote_ok=False,
+                )
+                return job_posting
+
+            # Extract domain for ATS handler lookup
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.lower()
+
+            # Use registered ATS handler if available
+            if domain in ATS_HANDLER:
+                # Create a minimal job posting to pass to the ATS handler
+                job_posting = JobPosting(url=url, source=domain)
+                return ATS_HANDLER[domain](job_posting, html_content)
+
+            # Otherwise, use generic HTML parsing
+            return self._extract_job_details_from_html(html_content, url)
+
+        finally:
+            await crawler.close_session()
+
+    def _extract_job_details_from_html(self, html_content: str, url: str) -> JobPosting:
+        """
+        Extract job details from HTML content using BeautifulSoup.
+
+        Args:
+            html_content: The HTML content of the job posting page
+            url: The URL of the job posting
+
+        Returns:
+            JobPosting with extracted details
+        """
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # Extract domain for source
+            parsed_url = urlparse(url)
+            source = parsed_url.netloc
+
+            # Remove common navigation/script elements
+            for element in soup(["script", "style", "nav", "header", "footer"]):
+                element.decompose()
+
+            # Try to extract title (look for common title selectors)
+            title = None
+            title_selectors = [
+                "h1",
+                '[data-testid="job-title"]',
+                ".job-title",
+                '[class*="title"]',
+                "title",
+            ]
+
+            for selector in title_selectors:
+                element = soup.select_one(selector)
+                if element and element.get_text(strip=True):
+                    title = element.get_text(strip=True)
                     break
 
-            yield {"type": "source_complete", "source": src, "pages": pages_emitted, "total": source_total}
+            # If no title found, try meta tags
+            if not title:
+                title_meta = soup.find("meta", attrs={"name": "title"}) or soup.find(
+                    "meta", attrs={"property": "og:title"}
+                )
+                if title_meta:
+                    title = title_meta.get("content", "")
 
-        yield {"type": "complete", "total_jobs": total_jobs, "sources": len(requested_sources), "pages": total_pages}
+            # Try to extract company name
+            company = None
+            company_selectors = [
+                '[data-testid="company-name"]',
+                ".company-name",
+                '[class*="company"]',
+                "[data-company]",
+            ]
 
-    # Helpers
+            for selector in company_selectors:
+                element = soup.select_one(selector)
+                if element and element.get_text(strip=True):
+                    company = element.get_text(strip=True)
+                    break
 
-    def _as_obj(self, job: JobPosting) -> Dict[str, Any]:
-        if hasattr(job, "model_dump"):
-            return job.model_dump()
-        d = getattr(job, "__dict__", {}) or {}
-        return dict(d)
+            # Try to extract location
+            location = None
+            location_selectors = [
+                '[data-testid="job-location"]',
+                ".job-location",
+                '[class*="location"]',
+                "[data-location]",
+            ]
 
-    def _compute_job_key(self, source: str, job: JobPosting) -> str:
-        """
-        Consistent key across events.
-        Preference: canonical_url + external/posting id when available.
-        Fallbacks to canonical_url + source to at least group by source.
-        """
-        url = self._canonical_url(getattr(job, "url", None))
-        jid = getattr(job, "external_id", None) or getattr(job, "posting_id", None) or ""
-        if jid:
-            return f"{source}:{url}::{jid}"
-        return f"{source}:{url}"
+            for selector in location_selectors:
+                element = soup.select_one(selector)
+                if element and element.get_text(strip=True):
+                    location = element.get_text(strip=True)
+                    break
 
-    def _normalize_tags(self, tags: Optional[List[str]]) -> List[str]:
-        if not tags:
-            return []
-        return [t.strip().lower() for t in tags if t and t.strip()]
+            # Try to extract salary
+            salary = None
+            salary_selectors = [
+                '[data-testid="job-salary"]',
+                ".job-salary",
+                '[class*="salary"]',
+                "[data-salary]",
+            ]
 
-    def _has_required_tags(self, job: JobPosting, req_tags_norm: List[str]) -> bool:
-        job_tags = [t.strip().lower() for t in (job.tags or []) if t and t.strip()]
-        return all(t in job_tags for t in req_tags_norm)
+            for selector in salary_selectors:
+                element = soup.select_one(selector)
+                if element and element.get_text(strip=True):
+                    salary = element.get_text(strip=True)
+                    break
 
-    def _canonical_url(self, url: Optional[str]) -> str:
-        """
-        Canonicalize URLs while preserving meaningful job identifiers.
-        - Removes common tracking parameters (utm_*, gh_src, ref, source, lever-source)
-        - Preserves meaningful params like ashby_jid
-        - Keeps proper separators and removes empty query/fragment
-        """
-        if not url:
-            return ""
-        u = url.strip()
-        u = re.sub(r"[?#](utm_[^=&]+=[^&]*&?)+", "", u, flags=re.I)
-        u = re.sub(r"[?#](gh_src|ref|source|lever-source|ashby_jid|ashby_src)=[^&]*&?", "?", u, flags=re.I)
-        u = re.sub(r"\?&+$", "?", u)
-        u = re.sub(r"[?#]$", "", u)
-        return u
-        try:
-            parsed = urlparse(url.strip())
-            # Lowercase scheme and netloc for consistency
-            scheme = (parsed.scheme or "").lower()
-            netloc = (parsed.netloc or "").lower()
-            path = parsed.path or ""
+            # Extract description (main content)
+            description = ""
+            description_selectors = [
+                '[data-testid="job-description"]',
+                ".job-description",
+                '[class*="description"]',
+                '[class*="job-posting"]',
+                "main",
+                "article",
+                ".content",
+            ]
 
-            # Parse query parameters
-            params = parse_qsl(parsed.query, keep_blank_values=False)
+            for selector in description_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    # Get text content and clean it up
+                    desc_text = element.get_text(separator=" ", strip=True)
+                    if len(desc_text) > len(description):
+                        description = desc_text
 
-            # Known tracking params to drop
-            drop_prefixes = ("utm_",)
-            drop_exact = {"gh_src", "ref", "source", "lever-source"}
+            # If still no description, get body text
+            if not description:
+                body = soup.find("body")
+                if body:
+                    description = body.get_text(separator=" ", strip=True)
 
-            kept = []
-            for k, v in params:
-                kl = k.lower()
-                if kl.startswith(drop_prefixes) or kl in drop_exact:
-                    continue
-                # Keep all others (e.g., ashby_jid)
-                kept.append((k, v))
+            # Limit description length to prevent oversized responses
+            if len(description) > 5000:
+                description = description[:5000] + "..."
 
-            query = urlencode(kept, doseq=True)
+            # Create job posting object
+            job_posting = JobPosting(
+                url=url,
+                source=source,
+                title=title or "Job Posting",
+                company=company or "Unknown Company",
+                location=location or "Location Not Specified",
+                description=description or "No description available",
+                salary=salary,
+                remote_ok="remote" in (description + " " + (title or "")).lower(),
+            )
 
-            # Remove fragment
-            fragment = ""
+            return job_posting
 
-            # If query becomes empty, ensure we don't end up with trailing ? or concatenation issues
-            canonical = urlunparse((scheme, netloc, path, "", query, fragment))
-            return canonical
-        except Exception:
-            # Fallback to older conservative regex cleanups if parsing fails
-            u = url.strip()
-            u = re.sub(r"[?#](utm_[^=&]+=[^&]*&?)+", "", u, flags=re.I)
-            u = re.sub(r"[?#](gh_src|ref|source|lever-source|ashby_jid|ashby_src)=[^&]*&?", "?", u, flags=re.I)
-            u = re.sub(r"\?&+$", "?", u)
-            u = re.sub(r"[?#]$", "", u)
-            return u
+        except Exception as e:
+            # If parsing fails, create a basic job posting with URL info
+            parsed = urlparse(url)
+            host = parsed.hostname or "unknown"
 
-    def _dedupe_jobs_merge_tags(self, jobs: List[JobPosting]) -> List[JobPosting]:
-        seen: Dict[Tuple[str, str], int] = {}
-        out: List[JobPosting] = []
-        for j in jobs:
-            key = (j.source or "", self._canonical_url(j.url))
-            if key in seen:
-                idx = seen[key]
-                keep = out[idx]
-                keep.tags = sorted(set((keep.tags or []) + (j.tags or [])))
-                keep.remote_ok = bool(getattr(keep, "remote_ok", False) or getattr(j, "remote_ok", False))
-                if (keep.location in (None, "", "Unknown")) and j.location and j.location != "Unknown":
-                    keep.location = j.location
-                if (keep.company in (None, "", "Unknown")) and j.company and j.company != "Unknown":
-                    keep.company = j.company
-                continue
-            seen[key] = len(out)
-            out.append(j)
-        return out
+            return JobPosting(
+                url=url,
+                source=host,
+                title=f"Job at {host}",
+                company=host,
+                location="Location Not Specified",
+                description=f"Could not parse job details from {url}. Error: {str(e)}",
+                salary=None,
+                remote_ok=False,
+            )
 
-    def _location_match(self, job: JobPosting, want: str) -> bool:
-        if not want:
-            return True
-        want_norm = want.strip().lower()
-        if not want_norm:
-            return True
+    async def close(self) -> None:
+        """Close all crawler sessions."""
+        _ = await asyncio.gather(
+            *(c.close_session() for c in self._instances.values()),
+            return_exceptions=True,
+        )
 
-        aliases = {
-            "united states": {"united states", "us", "usa", "u.s.", "u.s.a", "us-based", "us remote", "remote-us", "anywhere in the us"},
-            "united kingdom": {"united kingdom", "uk", "u.k.", "britain", "england", "scotland", "wales"},
-            "europe": {"europe", "eu", "e.u.", "european"},
-            "canada": {"canada", "ca", "canadian"},
-            "remote": {"remote", "anywhere", "distributed", "work from home", "wfh"},
-            "san francisco": {"san francisco", "sf", "bay area"},
-            "new york": {"new york", "ny", "nyc"},
-        }
+    # Async context manager methods
+    async def __aenter__(self):
+        return self
 
-        want_set = {want_norm}
-        for k, vals in aliases.items():
-            if want_norm == k or want_norm in vals:
-                want_set |= vals
-                want_set.add(k)
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+        return False
 
-        blob_parts = [
-            getattr(job, "location", "") or "",
-            getattr(job, "title", "") or "",
-            getattr(job, "company", "") or "",
-        ]
-        blob_parts.extend(getattr(job, "tags", []) or [])
-        blob = " ".join(blob_parts).lower()
 
-        return any(alias in blob for alias in want_set)
+# --------------------
+# Additional Helpers
+# --------------------
 
-    def list_job_tools(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                "name": "search_jobs",
-                "description": "Search aggregated jobs from multiple sources with filters.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "keywords": {"type": ["array", "null"], "items": {"type": "string"}},
-                        "sources": {"type": "array", "items": {"type": "string", "enum": list(self.SOURCE_MAP.keys())}},
-                        "location": {"type": "string"},
-                        "remote_only": {"type": "boolean"},
-                        "max_pages": {"type": "integer", "minimum": 1, "default": 1},
-                        "per_source_limit": {"type": "integer", "minimum": 1, "default": 100},
-                        "tags": {"type": ["array", "null"], "items": {"type": "string"}},
-                        "enrich": {"type": "boolean", "default": True},
-                        "enrich_limit": {"type": ["integer", "null"], "default": 50},
-                    },
-                    "required": ["sources", "location", "remote_only"],
-                },
-            }
-        ]
+# Other utility methods and classes can be added here...

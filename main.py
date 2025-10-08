@@ -60,24 +60,45 @@ async def run_stream(
         ):
             t = ev.get("type")
             if t == "start":
-                print(f"Start: sources={ev.get('sources')} max_pages={ev.get('max_pages')} per_source_limit={ev.get('per_source_limit')}", flush=True)
+                print(
+                    f"Start: sources={ev.get('sources')} max_pages={ev.get('max_pages')} per_source_limit={ev.get('per_source_limit')}",
+                    flush=True,
+                )
             elif t == "source_start":
                 print(f"Source start: {ev.get('source')}", flush=True)
             elif t == "page_start":
-                print(f"  Page start: source={ev.get('source')} page={ev.get('page')}", flush=True)
+                print(
+                    f"  Page start: source={ev.get('source')} page={ev.get('page')}",
+                    flush=True,
+                )
             elif t == "job":
                 data = ev.get("data", {})
                 title = data.get("title") or "Untitled"
                 company = data.get("company") or "Unknown"
-                print(f"    Job: [{ev.get('source')}] p{ev.get('page')} {title} @ {company}", flush=True)
+                print(
+                    f"    Job: [{ev.get('source')}] p{ev.get('page')} {title} @ {company}",
+                    flush=True,
+                )
             elif t == "page_complete":
-                print(f"  Page complete: source={ev.get('source')} page={ev.get('page')} count={ev.get('count')}", flush=True)
+                print(
+                    f"  Page complete: source={ev.get('source')} page={ev.get('page')} count={ev.get('count')}",
+                    flush=True,
+                )
             elif t == "source_complete":
-                print(f"Source complete: {ev.get('source')} pages={ev.get('pages')} total={ev.get('total')}", flush=True)
+                print(
+                    f"Source complete: {ev.get('source')} pages={ev.get('pages')} total={ev.get('total')}",
+                    flush=True,
+                )
             elif t == "complete":
-                print(f"Complete: total_jobs={ev.get('total_jobs')} sources={ev.get('sources')} pages={ev.get('pages')}", flush=True)
+                print(
+                    f"Complete: total_jobs={ev.get('total_jobs')} sources={ev.get('sources')} pages={ev.get('pages')}",
+                    flush=True,
+                )
             elif t == "error":
-                print(f"[ERROR] {ev.get('message')} (source={ev.get('source')} page={ev.get('page')})", flush=True)
+                print(
+                    f"[ERROR] {ev.get('message')} (source={ev.get('source')} page={ev.get('page')})",
+                    flush=True,
+                )
         return
 
     # JSON event mode
@@ -102,58 +123,91 @@ async def run_parse(svc: JobService, url: str, emit_json: bool):
     """
     if not url or not url.strip():
         msg = {"type": "parseError", "url": url or "", "error": "Missing --url"}
-        print_event(msg)
+        if emit_json:
+            print_event(msg)
+        else:
+            print(f"[ERROR] {msg['error']}: {msg['url']}")
         # Let caller decide exit code; main() handles it
         return 1
 
     try:
-        # If JobService provides a dedicated method in future, replace this block accordingly:
-        # details = await svc.parse_job_url(url)
-        # For now, synthesize best-effort metadata from the URL.
-        from urllib.parse import urlparse
+        # Use the new dedicated method to parse job URL
+        job_posting = await svc.parse_job_url(url)
 
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        path = (parsed.path or "").rstrip("/")
-        last_seg = path.split("/")[-1] if path else ""
-        base = host.split(".")
-        company = base[-2] if len(base) >= 2 else host
+        result = as_obj(job_posting)
+        result["type"] = "parsed"
 
-        result = {
-            "type": "parsed",
-            "url": url,
-            "title": f"Job: {last_seg}" if last_seg else "Job Posting",
-            "company": company or "Unknown",
-            "location": None,
-            "description": None,
-            "source": host or None,
-            "salary": None,
-            "team": None,
-        }
-        print_event(result)
+        if emit_json:
+            print_event(result)
+        else:
+            print(
+                f"Parsed job: {getattr(job_posting, 'title', 'Unknown')} at {getattr(job_posting, 'company', 'Unknown')}"
+            )
+            print(f"URL: {getattr(job_posting, 'url', '')}")
+            print(f"Location: {getattr(job_posting, 'location', 'Unknown')}")
+            if getattr(job_posting, "salary", None):
+                print(f"Salary: {getattr(job_posting, 'salary', '')}")
+            if getattr(job_posting, "description", None):
+                print(
+                    f"Description: {getattr(job_posting, 'description', '')[:200]}..."
+                )
         return 0
     except Exception as ex:
-        print_event({"type": "parseError", "url": url, "error": str(ex)})
+        error_msg = {"type": "parseError", "url": url, "error": str(ex)}
+        if emit_json:
+            print_event(error_msg)
+        else:
+            print(f"[ERROR] Failed to parse job URL {url}: {ex}")
         return 1
 
 
 async def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--sources", type=str, default="ycombinator", help="Comma-separated sources")
-    p.add_argument("--keywords", type=str, default="", help="Comma-separated keywords (optional)")
-    p.add_argument("--location", type=str, default="", help="Location filter (optional)")
-    p.add_argument("--remote-only", action="store_true", help="Only remote-friendly roles")
+    p.add_argument(
+        "--sources", type=str, default="ycombinator", help="Comma-separated sources"
+    )
+    p.add_argument(
+        "--keywords", type=str, default="", help="Comma-separated keywords (optional)"
+    )
+    p.add_argument(
+        "--location", type=str, default="", help="Location filter (optional)"
+    )
+    p.add_argument(
+        "--remote-only", action="store_true", help="Only remote-friendly roles"
+    )
     p.add_argument("--max-pages", type=int, default=1, help="Max pages per source")
-    p.add_argument("--per-source-limit", type=int, default=100, help="Approx items per page / per source batch")
+    p.add_argument(
+        "--per-source-limit",
+        type=int,
+        default=100,
+        help="Approx items per page / per source batch",
+    )
     p.add_argument("--json", action="store_true", help="Emit JSON events, one per line")
 
     # New: per-URL parse mode (backwards-compatible default to 'search')
-    p.add_argument("--mode", type=str, choices=["search", "parse"], default="search", help="Operation mode")
-    p.add_argument("--url", type=str, default="", help="Job posting URL for --mode parse")
+    p.add_argument(
+        "--mode",
+        type=str,
+        choices=["search", "parse"],
+        default="search",
+        help="Operation mode",
+    )
+    p.add_argument(
+        "--url", type=str, default="", help="Job posting URL for --mode parse"
+    )
 
     # Future flags (unchanged)
-    p.add_argument("--continuous", action="store_true", help="Run continuously (not used in finite mode yet)")
-    p.add_argument("--poll-interval-hours", type=float, default=12.0, help="Polling interval if --continuous is enabled (future)")
+    p.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Run continuously (not used in finite mode yet)",
+    )
+    p.add_argument(
+        "--poll-interval-hours",
+        type=float,
+        default=12.0,
+        help="Polling interval if --continuous is enabled (future)",
+    )
 
     args = p.parse_args()
 
@@ -168,17 +222,22 @@ async def main():
         sources = [s.strip() for s in args.sources.split(",") if s.strip()]
         keywords = args.keywords or None
         if args.json:
-            print_event({
-                "type": "banner",
-                "mode": "finite",
-                "sources": sources,
-                "max_pages": args.max_pages,
-                "per_source_limit": args.per_source_limit,
-                "remote_only": args.remote_only,
-                "location": args.location,
-            })
+            print_event(
+                {
+                    "type": "banner",
+                    "mode": "finite",
+                    "sources": sources,
+                    "max_pages": args.max_pages,
+                    "per_source_limit": args.per_source_limit,
+                    "remote_only": args.remote_only,
+                    "location": args.location,
+                }
+            )
         else:
-            print(f"Running finite stream: sources={sources} max_pages={args.max_pages} per_source_limit={args.per_source_limit}", flush=True)
+            print(
+                f"Running finite stream: sources={sources} max_pages={args.max_pages} per_source_limit={args.per_source_limit}",
+                flush=True,
+            )
 
     exit_code = 0
     async with JobService(cache_ttl_seconds=300) as svc:
