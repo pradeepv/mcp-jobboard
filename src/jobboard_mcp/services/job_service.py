@@ -13,6 +13,7 @@ from ..parsing import (
     LeverJobParser,
     GreenhouseJobParser,
     GenericHtmlParser,
+    HubOrFormParser,
 )
 from ..crawlers.base import BaseCrawler
 from ..crawlers.ycombinator import YCombinatorCrawler
@@ -192,7 +193,9 @@ class JobService:
             registry.register(AshbyJobParser())
             registry.register(LeverJobParser())
             registry.register(GreenhouseJobParser())
-            registry.register(GenericHtmlParser())  # keep last so specific parsers win
+            registry.register(GreenhouseJobParser())
+            registry.register(HubOrFormParser())
+            registry.register(GenericHtmlParser())  # keep generic last so specific parsers win
             try:
                 parser, det = registry.choose(url, soup)
                 parsed = parser.parse(url, soup)
