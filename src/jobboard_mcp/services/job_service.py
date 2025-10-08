@@ -6,7 +6,14 @@ from typing import Dict, List, Optional
 
 from ..models.job import JobPosting
 from bs4 import BeautifulSoup  # type: ignore
-from ..parsing import ParserRegistry, YcJobParser, AshbyJobParser, LeverJobParser, GreenhouseJobParser
+from ..parsing import (
+    ParserRegistry,
+    YcJobParser,
+    AshbyJobParser,
+    LeverJobParser,
+    GreenhouseJobParser,
+    GenericHtmlParser,
+)
 from ..crawlers.base import BaseCrawler
 from ..crawlers.ycombinator import YCombinatorCrawler
 from ..crawlers.hackernews import HackerNewsCrawler
@@ -185,6 +192,7 @@ class JobService:
             registry.register(AshbyJobParser())
             registry.register(LeverJobParser())
             registry.register(GreenhouseJobParser())
+            registry.register(GenericHtmlParser())  # keep last so specific parsers win
             try:
                 parser, det = registry.choose(url, soup)
                 parsed = parser.parse(url, soup)
