@@ -4,6 +4,7 @@ from .utils import sanitize_html, normalize_text, extract_tech_stack, normalize_
 from .parsers.yc import YcJobParser
 from .parsers.ashby import AshbyJobParser
 from .parsers.lever import LeverJobParser
+from .parsers.greenhouse import GreenhouseJobParser
 
 __all__ = [
     "ParsedJob",
@@ -21,4 +22,5 @@ __all__ = [
     "YcJobParser",
     "AshbyJobParser",
     "LeverJobParser",
+    "GreenhouseJobParser",
 ]
