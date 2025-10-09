@@ -48,6 +48,16 @@ class YcJobParser(Parser):
             loc = guess_location(header_text)
             if loc:
                 job.location = loc
+            # Salary/location normalization (best-effort from header)
+            from ..utils import parse_salary_components, refine_location
+            meta_text = header_text[:300]
+            sal = parse_salary_components(meta_text)
+            if sal:
+                mn, mx, cur, per, raw = sal
+                from ..models import SalaryInfo
+                job.salaryInfo = SalaryInfo(min=mn, max=mx, currency=cur, periodicity=per, raw=raw)
+            rl = refine_location(meta_text, job.location or "Unknown")
+            job.location = rl
 
         # Sections: collect h2.ycdc-section-title and following content until next h2
         sections: List[Section] = []

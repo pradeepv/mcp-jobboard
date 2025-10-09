@@ -65,9 +65,18 @@ class GreenhouseJobParser(Parser):
         job.descriptionText = "\n\n".join([s.text for s in sections if s.text]) or None
         job.descriptionHtml = "\n".join([s.html for s in sections if s.html]) or None
 
-        loc = guess_location(container.get_text(" ")) if container else None
+        ctxt = container.get_text(" ") if container else ""
+        loc = guess_location(ctxt) if ctxt else None
         if loc:
             job.location = loc
+        from ..utils import parse_salary_components, refine_location
+        meta = normalize_text(ctxt)[:300]
+        sal = parse_salary_components(meta)
+        if sal:
+            mn, mx, cur, per, raw = sal
+            from ..models import SalaryInfo
+            job.salaryInfo = SalaryInfo(min=mn, max=mx, currency=cur, periodicity=per, raw=raw)
+        job.location = refine_location(meta, job.location or "Unknown")
 
         if job.descriptionText:
             job.techStack = extract_tech_stack(job.descriptionText)

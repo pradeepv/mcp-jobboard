@@ -1,5 +1,5 @@
 import re
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from bs4 import BeautifulSoup  # type: ignore
 
@@ -64,6 +64,112 @@ def guess_location(text: str) -> str:
     if "remote" in text.lower():
         return "Remote"
     return "Unknown"
+
+
+# -------- Salary and location normalization v2 (non-breaking helpers) --------
+
+_CURRENCY_MAP = {
+    "$": "USD",
+    "£": "GBP",
+    "€": "EUR",
+}
+
+
+def parse_salary_components(text: str) -> Optional[Tuple[float, float, str, str, str]]:
+    """
+    Try to extract (min, max, currency, periodicity, raw) from free text.
+    Supports formats like "$140k–$180k", "$140,000 - $180,000", "€70,000 per year", "£80k-£100k".
+    Periodicity heuristics: year|annual|yr, month|mo, hour|hr.
+    Returns None if not found.
+    """
+    if not text:
+        return None
+    t = text.lower().replace("\u2013", "-").replace("\u2014", "-")  # normalize dashes
+    # currency symbol
+    cur_sym = None
+    for sym in _CURRENCY_MAP:
+        if sym in text:
+            cur_sym = sym
+            break
+    currency = _CURRENCY_MAP.get(cur_sym or "", "")
+
+    # Extract numbers with optional k and thousands separators
+    # Examples: 140k - 180k, 140,000 - 180,000, 70k
+    m = re.search(r"(\d+[\d,]*\s*(k)?)\s*[-to–]+\s*(\d+[\d,]*\s*(k)?)", t)
+    single = re.search(r"(\d+[\d,]*\s*(k)?)", t) if not m else None
+
+    mn = mx = None
+    if m:
+        g1, k1, g2, k2 = m.group(1), m.group(2), m.group(3), m.group(4)
+        def to_num(g, kflag):
+            val = float(g.replace(",", "").replace(" ", ""))
+            if kflag:
+                val *= 1000.0
+            return val
+        # remove trailing k letters in numeric conversion
+        def clean_num(s: str) -> Tuple[float, bool]:
+            kflag = s.strip().endswith("k")
+            s2 = s.strip().rstrip("k").replace(",", "")
+            return (float(s2), kflag)
+        v1_raw, v2_raw = g1, g2
+        v1, kf1 = clean_num(v1_raw)
+        v2, kf2 = clean_num(v2_raw)
+        if kf1:
+            v1 *= 1000.0
+        if kf2:
+            v2 *= 1000.0
+        mn, mx = v1, v2
+    elif single:
+        g1 = single.group(1)
+        s_clean = g1.strip().rstrip("k").replace(",", "")
+        try:
+            val = float(s_clean)
+            if g1.strip().endswith("k"):
+                val *= 1000.0
+            mn = mx = val
+        except Exception:
+            return None
+    else:
+        return None
+
+    # periodicity
+    period = "year"
+    if any(p in t for p in ["per month", "/mo", "monthly", "per mo"]):
+        period = "month"
+    elif any(p in t for p in ["per hour", "/hr", "hourly", "per hr"]):
+        period = "hour"
+    elif any(p in t for p in ["per year", "/yr", "yearly", "annual", "annually"]):
+        period = "year"
+
+    raw = text.strip()
+    return (float(mn), float(mx), currency, period, raw)
+
+
+def refine_location(text: str, fallback: str = "Unknown") -> str:
+    """Improve location guess with common patterns like Remote, Hybrid, EU Remote, US/CA, etc."""
+    if not text:
+        return fallback
+    tl = text.lower()
+    if "hybrid" in tl:
+        return "Hybrid"
+    if "remote" in tl:
+        if "eu" in tl:
+            return "EU Remote"
+        if "us" in tl or "usa" in tl or "united states" in tl:
+            return "US Remote"
+        if "ca" in tl or "canada" in tl:
+            return "CA Remote"
+        return "Remote"
+    # simple city/country hints
+    if "san francisco" in tl:
+        return "San Francisco, CA"
+    if "new york" in tl:
+        return "New York, NY"
+    if "london" in tl:
+        return "London, UK"
+    if "berlin" in tl:
+        return "Berlin, DE"
+    return fallback
 
 
 # -------- List extraction and section classification --------
