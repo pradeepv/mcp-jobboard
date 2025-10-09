@@ -70,11 +70,20 @@ class AshbyJobParser(Parser):
         job.descriptionText = "\n\n".join([s.text for s in sections if s.text]) or None
         job.descriptionHtml = "\n".join([s.html for s in sections if s.html]) or None
 
-        # Location guess from container text
+        # Location guess from container text + salary normalization
         if container:
-            loc = guess_location(container.get_text(" "))
+            ct = container.get_text(" ")
+            loc = guess_location(ct)
             if loc:
                 job.location = loc
+            from ..utils import parse_salary_components, refine_location
+            meta = normalize_text(ct)[:300]
+            sal = parse_salary_components(meta)
+            if sal:
+                mn, mx, cur, per, raw = sal
+                from ..models import SalaryInfo
+                job.salaryInfo = SalaryInfo(min=mn, max=mx, currency=cur, periodicity=per, raw=raw)
+            job.location = refine_location(meta, job.location or "Unknown")
 
         if job.descriptionText:
             job.techStack = extract_tech_stack(job.descriptionText)
