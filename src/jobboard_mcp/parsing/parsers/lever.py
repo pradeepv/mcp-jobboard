@@ -4,9 +4,19 @@ from typing import List
 
 from bs4 import BeautifulSoup  # type: ignore
 
-from ..models import ParsedJob, Section
+from ..models import ParsedJob, Section, CompanyProfile
 from ..registry import Parser, DetectionResult
-from ..utils import sanitize_html, normalize_text, extract_tech_stack, guess_location, classify_section, extract_list_items_from_html
+from ..utils import (
+    sanitize_html,
+    normalize_text,
+    extract_tech_stack,
+    guess_location,
+    classify_section,
+    extract_list_items_from_html,
+    extract_company_links,
+    extract_company_tagline,
+    find_about_company,
+)
 
 
 class LeverJobParser(Parser):
@@ -46,7 +56,9 @@ class LeverJobParser(Parser):
                 job.company = parts[-1]
 
         # Container for sections
-        container = doc.select_one(".posting") or doc.select_one(".posting-description") or doc
+        container = (
+            doc.select_one(".posting") or doc.select_one(".posting-description") or doc
+        )
 
         sections: List[Section] = []
         for heading_tag in container.select("h2, h3"):
@@ -60,7 +72,11 @@ class LeverJobParser(Parser):
                 if sib.name in ("div", "p", "ul", "ol", "li"):
                     html_parts.append(str(sib))
             html = sanitize_html("\n".join(html_parts)) if html_parts else None
-            text = normalize_text(BeautifulSoup(html or "", "html.parser").get_text(" \n")) if html else None
+            text = (
+                normalize_text(BeautifulSoup(html or "", "html.parser").get_text(" \n"))
+                if html
+                else None
+            )
             if heading or html or text:
                 sections.append(Section(heading=heading or "", html=html, text=text))
 
@@ -74,12 +90,16 @@ class LeverJobParser(Parser):
         if loc:
             job.location = loc
         from ..utils import parse_salary_components, refine_location
+
         meta = normalize_text(htxt)[:300]
         sal = parse_salary_components(meta)
         if sal:
             mn, mx, cur, per, raw = sal
             from ..models import SalaryInfo
-            job.salaryInfo = SalaryInfo(min=mn, max=mx, currency=cur, periodicity=per, raw=raw)
+
+            job.salaryInfo = SalaryInfo(
+                min=mn, max=mx, currency=cur, periodicity=per, raw=raw
+            )
         job.location = refine_location(meta, job.location or "Unknown")
 
         if job.descriptionText:
@@ -111,5 +131,18 @@ class LeverJobParser(Parser):
         if sections:
             score += 20
         job.contentScore = min(100, score)
+
+        # Company profile enrichment
+        links = extract_company_links(doc)
+        tagline = extract_company_tagline(doc)
+        about_text, about_html = find_about_company(sections)
+        job.companyProfile = CompanyProfile(
+            name=job.company,
+            tagline=tagline,
+            aboutText=about_text,
+            aboutHtml=about_html,
+            links=links,
+            locations=[job.location] if job.location else [],
+        )
 
         return job

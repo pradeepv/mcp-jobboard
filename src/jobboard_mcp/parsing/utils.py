@@ -1,5 +1,5 @@
 import re
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 from bs4 import BeautifulSoup  # type: ignore
 
@@ -170,6 +170,76 @@ def refine_location(text: str, fallback: str = "Unknown") -> str:
     if "berlin" in tl:
         return "Berlin, DE"
     return fallback
+
+
+# -------- Company profile helpers --------
+
+def extract_company_links(doc) -> Dict[str, Optional[str]]:
+    """Best-effort extraction of company links from meta and anchors.
+    Returns dict with keys: website, careers, linkedin, twitter.
+    """
+    links: Dict[str, Optional[str]] = {
+        "website": None,
+        "careers": None,
+        "linkedin": None,
+        "twitter": None,
+    }
+    # Meta og:url or canonical as website
+    og = doc.find("meta", attrs={"property": "og:url"})
+    if og and og.get("content"):
+        links["website"] = og["content"]
+    can = doc.find("link", attrs={"rel": ["canonical", "Canonical"]})
+    if not links["website"] and can and can.get("href"):
+        links["website"] = can["href"]
+    # Anchor-based guesses
+    for a in doc.select("a[href]"):
+        href = a.get("href", "")
+        hl = href.lower()
+        if not links["linkedin"] and ("linkedin.com" in hl):
+            links["linkedin"] = href
+        if not links["twitter"] and ("twitter.com" in hl or "x.com" in hl):
+            links["twitter"] = href
+        if not links["careers"] and ("/careers" in hl or "/jobs" in hl or "boards.greenhouse.io" in hl or "jobs.lever.co" in hl or "jobs.ashbyhq.com" in hl):
+            links["careers"] = href
+    return links
+
+
+def extract_company_tagline(doc) -> Optional[str]:
+    """Short company tagline from common containers or meta.
+    """
+    # Meta description
+    md = doc.find("meta", attrs={"name": "description"})
+    if md and md.get("content"):
+        return normalize_text(md["content"])[:200]
+    # YC specific: div.space-y-1 often has short blurb
+    blk = doc.select_one("div.space-y-1")
+    if blk:
+        t = normalize_text(blk.get_text(" "))
+        if t:
+            return t[:200]
+    # Generic: first paragraph in header or main
+    p = doc.select_one("header p, main p, article p")
+    if p:
+        t = normalize_text(p.get_text(" "))
+        if t:
+            return t[:200]
+    return None
+
+
+def find_about_company(sections: List["Section"]) -> Tuple[Optional[str], Optional[str]]:
+    """Return (text, html) for an 'About the company' section when present."""
+    if not sections:
+        return (None, None)
+    keys = [
+        "about the company",
+        "about us",
+        "company",
+    ]
+    for s in sections:
+        h = (s.heading or "").lower()
+        if any(k in h for k in keys):
+            return (s.text, s.html)
+    return (None, None)
 
 
 # -------- List extraction and section classification --------
