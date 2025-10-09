@@ -4,9 +4,9 @@ from typing import List
 
 from bs4 import BeautifulSoup  # type: ignore
 
-from ..models import ParsedJob, Section
+from ..models import ParsedJob, Section, CompanyProfile
 from ..registry import Parser, DetectionResult
-from ..utils import sanitize_html, normalize_text, extract_tech_stack, guess_location, classify_section, extract_list_items_from_html
+from ..utils import sanitize_html, normalize_text, extract_tech_stack, guess_location, classify_section, extract_list_items_from_html, extract_company_links, extract_company_tagline, find_about_company
 
 
 class AshbyJobParser(Parser):
@@ -114,5 +114,18 @@ class AshbyJobParser(Parser):
         if sections:
             score += 20
         job.contentScore = min(100, score)
+
+        # Company profile enrichment
+        links = extract_company_links(doc)
+        tagline = extract_company_tagline(doc)
+        about_text, about_html = find_about_company(sections)
+        job.companyProfile = CompanyProfile(
+            name=job.company,
+            tagline=tagline,
+            aboutText=about_text,
+            aboutHtml=about_html,
+            links=links,
+            locations=[job.location] if job.location else [],
+        )
 
         return job
