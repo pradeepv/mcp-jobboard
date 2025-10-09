@@ -42,7 +42,26 @@ class GreenhouseJobParser(Parser):
             if len(parts) >= 2:
                 job.company = parts[-1]
 
-        container = doc.select_one("#app, .app, .content, .application, .opening, .job") or doc
+        # Strip obvious non-description UI chrome to reduce noise
+        for el in doc.select("nav, header, footer, form, aside, [role='dialog'], .overlay, .modal, .application, .apply, .field, .input, .select"):
+            try:
+                el.decompose()
+            except Exception:
+                pass
+
+        # Prefer a more specific description container to avoid grabbing the entire app chrome
+        container = (
+            doc.select_one(".content .body")
+            or doc.select_one(".content .section")
+            or doc.select_one(".application .content")
+            or doc.select_one(".opening .content")
+            or doc.select_one(".job .content")
+            or doc.select_one("#content")
+            or doc.select_one(".job-posting")
+            or doc.select_one("article .content")
+            or doc.select_one(".content")
+            or doc
+        )
 
         sections: List[Section] = []
         # Many GH pages use h2/h3 to segment content
@@ -61,6 +80,44 @@ class GreenhouseJobParser(Parser):
             if heading or html or text:
                 sections.append(Section(heading=heading or "", html=html, text=text))
 
+        # If no headings found, attempt heuristic pseudo-sections by keyword anchors within container
+        if not sections:
+            keywords = [
+                ("Responsibilities", "responsibilities"),
+                ("Qualifications", "requirements"),
+                ("Requirements", "requirements"),
+                ("Benefits", "benefits"),
+                ("Perks", "benefits"),
+            ]
+            text_blocks = container.find_all(["strong", "b", "h4", "h5", "p"])
+            for tb in text_blocks:
+                t = normalize_text(tb.get_text(" "))
+                for kw, _kind in keywords:
+                    if kw.lower() in t.lower():
+                        # collect following siblings until next strong/heading
+                        html_parts: List[str] = []
+                        for sib in tb.find_all_next():
+                            if sib == tb:
+                                continue
+                            if sib.name in ("strong", "b", "h2", "h3", "h4", "h5", "hr"):
+                                break
+                            if sib.name in ("div", "p", "ul", "ol", "li"):
+                                html_parts.append(str(sib))
+                        html = sanitize_html("\n".join(html_parts)) if html_parts else None
+                        text = normalize_text(BeautifulSoup(html or "", "html.parser").get_text(" \n")) if html else None
+                        if html or text:
+                            sections.append(Section(heading=kw, html=html, text=text))
+                        break
+
+        # If still no sections, create a section per large list to surface bullets
+        if not sections:
+            lists = container.select("ul, ol")
+            for i, lst in enumerate(lists[:3]):  # limit to first few lists
+                html = sanitize_html(str(lst))
+                text = normalize_text(BeautifulSoup(html, "html.parser").get_text(" \n"))
+                if text and len(text) > 60:
+                    sections.append(Section(heading=f"List {i+1}", html=html, text=text))
+
         job.sections = sections
         job.descriptionText = "\n\n".join([s.text for s in sections if s.text]) or None
         job.descriptionHtml = "\n".join([s.html for s in sections if s.html]) or None
@@ -77,6 +134,17 @@ class GreenhouseJobParser(Parser):
             from ..models import SalaryInfo
             job.salaryInfo = SalaryInfo(min=mn, max=mx, currency=cur, periodicity=per, raw=raw)
         job.location = refine_location(meta, job.location or "Unknown")
+
+        # Company inference from meta/site_name or page title if missing
+        if not job.company and doc.title and doc.title.string:
+            pt = doc.title.string
+            parts = [p.strip() for p in pt.split("-") if p.strip()]
+            if len(parts) >= 2:
+                job.company = parts[-1]
+        if not job.company:
+            ogsn = doc.find("meta", attrs={"property": "og:site_name"})
+            if ogsn and ogsn.get("content"):
+                job.company = normalize_text(ogsn["content"]) or job.company
 
         if job.descriptionText:
             job.techStack = extract_tech_stack(job.descriptionText)
