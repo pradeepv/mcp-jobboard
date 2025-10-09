@@ -59,6 +59,17 @@ async def run(url: str) -> None:
     print("TechStack:", parsed.techStack)
     print("ContentScore:", parsed.contentScore)
     print("Warnings:", parsed.warnings)
+    try:
+        cp = getattr(parsed, "companyProfile", None)
+        if cp:
+            print("CompanyProfile:", {
+                "name": cp.name,
+                "tagline": cp.tagline,
+                "links": cp.links,
+                "locations": cp.locations,
+            })
+    except Exception:
+        pass
     print("Preview:", trunc(parsed.descriptionText))
 
 
@@ -67,4 +78,3 @@ if __name__ == "__main__":
         print("Usage: python scripts/diagnose_url.py <URL>")
         sys.exit(1)
     asyncio.run(run(sys.argv[1]))
-

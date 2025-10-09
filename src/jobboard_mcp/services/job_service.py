@@ -199,6 +199,28 @@ class JobService:
             try:
                 parser, det = registry.choose(url, soup)
                 parsed = parser.parse(url, soup)
+
+                # Structured parse diagnostics
+                try:
+                    desc_len = len(parsed.descriptionText or "")
+                    sections_len = len(parsed.sections or [])
+                    req_len = len(parsed.requirements or [])
+                    res_len = len(parsed.responsibilities or [])
+                    ben_len = len(parsed.benefits or [])
+                    tech_len = len(parsed.techStack or [])
+                    salary_present = 1 if getattr(parsed, "salaryInfo", None) else 0
+                    links = getattr(parsed, "companyProfile", None).links if getattr(parsed, "companyProfile", None) else {}
+                    links_present = 1 if links else 0
+                    warnings_len = len(parsed.warnings or [])
+                    print(
+                        f"[MCP-Parse] parser={parsed.parser} detect.score={det.score} detect.reason={det.reason} "
+                        f"desc.len={desc_len} sections={sections_len} req={req_len} res={res_len} ben={ben_len} "
+                        f"tech={tech_len} salary={salary_present} links={links_present} warnings={warnings_len}",
+                        flush=True,
+                    )
+                except Exception:
+                    # Never break parsing on logging
+                    pass
                 description = parsed.descriptionText or parsed.descriptionHtml or ""
                 if description and len(description) > 5000:
                     description = description[:5000] + "..."
